@@ -1,12 +1,15 @@
 {
-  "$schema": "https://opencode.ai/config.json",
-  "model": "opencode/deepseek-v4-flash-free",
-  "watcher": {
-    "ignore": ["target/**"],
-  },
-  "agent": {
-    "architect-reviewer": {
-      "model": "opencode/qwen3.6-plus-free",
+    "$schema": "https://opencode.ai/config.json",
+    "model": "opencode/deepseek-v4-flash-free",
+    "watcher": {
+        "ignore": ["target/**"],
     },
-  },
+    "agent": {
+        "architect-reviewer": {
+            "model": "opencode/qwen3.6-plus-free",
+        },
+        "debugger": {
+            "model": "opencode/qwen3.6-plus-free",
+        },
+    },
 }
