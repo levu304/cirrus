@@ -354,9 +354,9 @@ pub struct ListBucketResult {
     #[serde(rename = "Prefix")]
     pub prefix: String,
     #[serde(rename = "MaxKeys")]
-    pub max_keys: i32,
+    pub max_keys: u32,
     #[serde(rename = "KeyCount")]
-    pub key_count: i32,
+    pub key_count: u32,
     #[serde(rename = "IsTruncated")]
     pub is_truncated: bool,
     #[serde(rename = "NextContinuationToken")]
@@ -377,7 +377,7 @@ pub struct ObjectInfo {
     #[serde(rename = "ETag")]
     pub etag: String,
     #[serde(rename = "Size")]
-    pub size: i64,
+    pub size: u64,
     #[serde(rename = "StorageClass")]
     pub storage_class: StorageClass,
     #[serde(rename = "Owner", skip_serializing_if = "Option::is_none")]
@@ -527,7 +527,7 @@ pub struct ListPartsResult {
     #[serde(rename = "Owner")]
     pub owner: Owner,
     #[serde(rename = "MaxParts")]
-    pub max_parts: i32,
+    pub max_parts: u32,
     #[serde(rename = "NextPartNumberMarker")]
     pub next_part_number_marker: String,
     #[serde(rename = "PartNumberMarker")]
@@ -550,7 +550,7 @@ pub struct PartInfo {
     #[serde(rename = "ETag")]
     pub etag: String,
     #[serde(rename = "Size")]
-    pub size: i64,
+    pub size: u64,
 }
 
 // ---------------------------------------------------------------------------

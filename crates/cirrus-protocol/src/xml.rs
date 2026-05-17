@@ -85,7 +85,7 @@ mod tests {
         #[serde(rename = "Name")]
         name: String,
         #[serde(rename = "Count")]
-        count: i32,
+        count: u32,
     }
 
     #[test]
