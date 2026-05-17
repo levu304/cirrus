@@ -27,10 +27,153 @@ pub(crate) fn expand_empty_tags(xml: &str) -> String {
 
     while let Some(ch) = chars.next() {
         if ch == '<' {
-            // Collect the full tag until '>'
+            // Peek ahead to detect special XML constructs before treating as a tag.
+            let lookahead: String = chars.clone().take(8).collect();
+
+            // XML comment: <!-- ... -->
+            if lookahead.starts_with("!--") {
+                result.push_str("<!--");
+                chars.next(); // !
+                chars.next(); // -
+                chars.next(); // -
+                // Scan for "-->", handling consecutive hyphens correctly
+                loop {
+                    match chars.next() {
+                        Some('-') => {
+                            // Collect consecutive hyphens
+                            let mut hyphen_count = 1;
+                            while let Some(&'-') = chars.peek() {
+                                chars.next();
+                                hyphen_count += 1;
+                            }
+                            match chars.next() {
+                                Some('>') if hyphen_count >= 2 => {
+                                    // Found "-->" (or more hyphens + ">")
+                                    for _ in 0..hyphen_count {
+                                        result.push('-');
+                                    }
+                                    result.push('>');
+                                    break;
+                                }
+                                Some(c) => {
+                                    // Not a terminator, emit all hyphens and the char
+                                    for _ in 0..hyphen_count {
+                                        result.push('-');
+                                    }
+                                    result.push(c);
+                                }
+                                None => {
+                                    // Unterminated comment
+                                    for _ in 0..hyphen_count {
+                                        result.push('-');
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        Some(c) => {
+                            result.push(c);
+                        }
+                        None => break, // Unterminated comment
+                    }
+                }
+                continue;
+            }
+
+            // CDATA section: <![CDATA[ ... ]]>
+            if lookahead.starts_with("![CDATA[") {
+                result.push_str("<![CDATA[");
+                for _ in 0..8 {
+                    chars.next();
+                }
+                // Scan for "]]>", handling consecutive brackets correctly
+                loop {
+                    match chars.next() {
+                        Some(']') => {
+                            let mut bracket_count = 1;
+                            while let Some(&']') = chars.peek() {
+                                chars.next();
+                                bracket_count += 1;
+                            }
+                            match chars.next() {
+                                Some('>') if bracket_count >= 2 => {
+                                    for _ in 0..bracket_count {
+                                        result.push(']');
+                                    }
+                                    result.push('>');
+                                    break;
+                                }
+                                Some(c) => {
+                                    for _ in 0..bracket_count {
+                                        result.push(']');
+                                    }
+                                    result.push(c);
+                                }
+                                None => {
+                                    for _ in 0..bracket_count {
+                                        result.push(']');
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        Some(c) => {
+                            result.push(c);
+                        }
+                        None => break, // Unterminated CDATA
+                    }
+                }
+                continue;
+            }
+
+            // Processing instruction: <? ... ?>
+            if lookahead.starts_with('?') {
+                result.push_str("<?");
+                chars.next(); // ?
+                // Scan for "?>", handling consecutive question marks correctly
+                loop {
+                    match chars.next() {
+                        Some('?') => {
+                            let mut question_count = 1;
+                            while let Some(&'?') = chars.peek() {
+                                chars.next();
+                                question_count += 1;
+                            }
+                            match chars.next() {
+                                Some('>') => {
+                                    for _ in 0..question_count {
+                                        result.push('?');
+                                    }
+                                    result.push('>');
+                                    break;
+                                }
+                                Some(c) => {
+                                    for _ in 0..question_count {
+                                        result.push('?');
+                                    }
+                                    result.push(c);
+                                }
+                                None => {
+                                    for _ in 0..question_count {
+                                        result.push('?');
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        Some(c) => {
+                            result.push(c);
+                        }
+                        None => break, // Unterminated PI
+                    }
+                }
+                continue;
+            }
+
+            // Regular tag: collect until '>' and check for self-closing
             let mut tag = String::new();
             let mut found_gt = false;
-            while let Some(c) = chars.next() {
+            for c in chars.by_ref() {
                 if c == '>' {
                     found_gt = true;
                     break;
@@ -745,6 +888,80 @@ mod tests {
         let input = "<Name>café</Name><Empty/><Value>日本語</Value>";
         let output = expand_empty_tags(input);
         assert_eq!(output, "<Name>café</Name><Empty></Empty><Value>日本語</Value>");
+    }
+
+    #[test]
+    fn test_expand_empty_tags_comment() {
+        // Self-closing-looking patterns inside XML comments must NOT be expanded
+        let input = "<Root><!-- <Foo/> --><Bar/></Root>";
+        let output = expand_empty_tags(input);
+        assert!(output.contains("<!-- <Foo/> -->"), "comment content should be preserved: {output}");
+        assert!(output.contains("<Bar></Bar>"), "real tag should be expanded: {output}");
+        assert!(!output.contains("<!-- <Foo></Foo> -->"), "comment must not be mutated: {output}");
+    }
+
+    #[test]
+    fn test_expand_empty_tags_comment_no_match() {
+        // Comments without any /> patterns pass through cleanly
+        let input = "<Root><!-- just a comment --><Tag/></Root>";
+        let output = expand_empty_tags(input);
+        assert_eq!(output, "<Root><!-- just a comment --><Tag></Tag></Root>");
+    }
+
+    #[test]
+    fn test_expand_empty_tags_mixed() {
+        // Mix of real self-closing tags, comments with />, CDATA, and PIs
+        let input = r#"<Root>
+            <Empty/>
+            <!-- <Fake/> -->
+            <![CDATA[ <AlsoFake/> ]]>
+            <?ignore <Nope/> ?>
+            <Real/>
+        </Root>"#;
+        let output = expand_empty_tags(input);
+        // Real self-closing tags should expand
+        assert!(output.contains("<Empty></Empty>"), "Empty should expand: {output}");
+        assert!(output.contains("<Real></Real>"), "Real should expand: {output}");
+        // Comment content must stay intact
+        assert!(output.contains("<!-- <Fake/> -->"), "comment must not expand: {output}");
+        // CDATA content must stay intact
+        assert!(output.contains("<![CDATA[ <AlsoFake/> ]]>"), "CDATA must not expand: {output}");
+        // PI content must stay intact
+        assert!(output.contains("<?ignore <Nope/> ?>"), "PI must not expand: {output}");
+    }
+
+    #[test]
+    fn test_expand_empty_tags_cdata() {
+        // CDATA sections pass through without expanding internal />
+        let input = "<Data><![CDATA[some <Thing/> here]]></Data>";
+        let output = expand_empty_tags(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_expand_empty_tags_processing_instruction() {
+        // Processing instructions pass through without expanding internal />
+        let input = "<?xml-stylesheet href='style.css'?><Root><Tag/></Root>";
+        let output = expand_empty_tags(input);
+        assert!(output.contains("<?xml-stylesheet href='style.css'?>"), "PI preserved: {output}");
+        assert!(output.contains("<Tag></Tag>"), "real tag expanded: {output}");
+    }
+
+    #[test]
+    fn test_expand_empty_tags_comment_with_multiple_slashes() {
+        // Comment containing multiple /> patterns — none should expand
+        let input = "<Root><!-- <A/> and <B/> --></Root>";
+        let output = expand_empty_tags(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_expand_empty_tags_nested_comment_like() {
+        // Edge case: comment with --> appearing in text content should still work
+        let input = "<Root><!-- comment with > in it --><Tag/></Root>";
+        let output = expand_empty_tags(input);
+        assert!(output.contains("<!-- comment with > in it -->"), "comment with > preserved: {output}");
+        assert!(output.contains("<Tag></Tag>"), "real tag expanded: {output}");
     }
 
     // -- to_xml_string wrapper -------------------------------------------
