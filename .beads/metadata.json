@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "cirrus",
+  "project_id": "5f14cc90-b3ad-458f-a9c9-207df13fccbd"
+}
