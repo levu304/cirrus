@@ -3,3 +3,11 @@
 .dolt/
 *.db
 .beads-credential-key
+
+# Rust / Cirrus
+target/
+.DS_Store
+*.swp
+.env
+*.log
+benchmark_results/

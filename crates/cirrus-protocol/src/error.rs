@@ -1,0 +1,1 @@
+// Cirrus protocol error types.
