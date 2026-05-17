@@ -10,6 +10,7 @@
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // XML serialization helpers
@@ -495,9 +496,24 @@ pub struct CompleteMultipartUploadRequest {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Part {
     #[serde(rename = "PartNumber")]
+    #[serde(deserialize_with = "deserialize_part_number")]
     pub part_number: u32,
     #[serde(rename = "ETag")]
     pub etag: String,
+}
+
+fn deserialize_part_number<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u32::deserialize(deserializer)?;
+    if value < 1 || value > 10000 {
+        return Err(serde::de::Error::custom(format!(
+            "PartNumber must be between 1 and 10000, got {}",
+            value
+        )));
+    }
+    Ok(value)
 }
 
 /// Response for a completed multipart upload.
@@ -963,6 +979,58 @@ mod tests {
         assert_eq!(req.parts[0].etag, "\"etag-1\"");
         assert_eq!(req.parts[1].part_number, 2);
         assert_eq!(req.parts[1].etag, "\"etag-2\"");
+    }
+
+    #[test]
+    fn test_part_number_validation_valid_values() {
+        // Test minimum valid value
+        let xml_min = r#"
+            <CompleteMultipartUpload>
+                <Part><PartNumber>1</PartNumber><ETag>"etag-1"</ETag></Part>
+            </CompleteMultipartUpload>
+        "#;
+        let req: CompleteMultipartUploadRequest = from_str(xml_min).expect("deserialize valid part number 1");
+        assert_eq!(req.parts[0].part_number, 1);
+        
+        // Test maximum valid value
+        let xml_max = r#"
+            <CompleteMultipartUpload>
+                <Part><PartNumber>10000</PartNumber><ETag>"etag-max"</ETag></Part>
+            </CompleteMultipartUpload>
+        "#;
+        let req_max: CompleteMultipartUploadRequest = from_str(xml_max).expect("deserialize valid part number 10000");
+        assert_eq!(req_max.parts[0].part_number, 10000);
+        
+        // Test middle value
+        let xml_mid = r#"
+            <CompleteMultipartUpload>
+                <Part><PartNumber>5000</PartNumber><ETag>"etag-mid"</ETag></Part>
+            </CompleteMultipartUpload>
+        "#;
+        let req_mid: CompleteMultipartUploadRequest = from_str(xml_mid).expect("deserialize valid part number 5000");
+        assert_eq!(req_mid.parts[0].part_number, 5000);
+    }
+
+    #[test]
+    #[should_panic(expected = "PartNumber must be between 1 and 10000")]
+    fn test_part_number_validation_invalid_zero() {
+        let xml = r#"
+            <CompleteMultipartUpload>
+                <Part><PartNumber>0</PartNumber><ETag>"etag-zero"</ETag></Part>
+            </CompleteMultipartUpload>
+        "#;
+        let _req: CompleteMultipartUploadRequest = from_str(xml).expect("deserialize should fail for part number 0");
+    }
+
+    #[test]
+    #[should_panic(expected = "PartNumber must be between 1 and 10000")]
+    fn test_part_number_validation_invalid_too_large() {
+        let xml = r#"
+            <CompleteMultipartUpload>
+                <Part><PartNumber>10001</PartNumber><ETag>"etag-too-large"</ETag></Part>
+            </CompleteMultipartUpload>
+        "#;
+        let _req: CompleteMultipartUploadRequest = from_str(xml).expect("deserialize should fail for part number 10001");
     }
 
     // -- CompleteMultipartUploadResult -----------------------------------
