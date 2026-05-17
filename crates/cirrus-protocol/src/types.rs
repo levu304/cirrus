@@ -357,6 +357,8 @@ pub struct ObjectInfo {
     pub size: i64,
     #[serde(rename = "StorageClass")]
     pub storage_class: String,
+    #[serde(rename = "Owner", skip_serializing_if = "Option::is_none")]
+    pub owner: Option<Owner>,
 }
 
 /// One common-prefix entry inside `<CommonPrefixes>`.
@@ -612,6 +614,7 @@ mod tests {
                 etag: "\"d41d8cd98f00b204e9800998ecf8427e\"".into(),
                 size: 1024,
                 storage_class: "STANDARD".into(),
+                owner: None,
             }],
             common_prefixes: vec![CommonPrefixes {
                 prefix: "photos/".into(),
@@ -658,6 +661,48 @@ mod tests {
         assert!(xml.contains("<Delimiter></Delimiter>"));
         assert!(xml.contains("<Prefix></Prefix>"));
         assert!(xml.contains("<NextContinuationToken></NextContinuationToken>"));
+    }
+
+    // -- ObjectInfo Owner ------------------------------------------------
+
+    #[test]
+    fn test_object_info_with_owner_serializes_owner_element() {
+        let obj = ObjectInfo {
+            key: "photos/cat.jpg".into(),
+            last_modified: Utc::now(),
+            etag: "\"d41d8cd98f00b204e9800998ecf8427e\"".into(),
+            size: 1024,
+            storage_class: "STANDARD".into(),
+            owner: Some(Owner {
+                id: "user-123".into(),
+                display_name: "Test Owner".into(),
+            }),
+        };
+        let xml = to_xml_string(&obj);
+        assert!(xml.contains("<Owner>"), "should contain Owner element: {xml}");
+        assert!(xml.contains("<ID>user-123</ID>"), "should contain ID: {xml}");
+        assert!(
+            xml.contains("<DisplayName>Test Owner</DisplayName>"),
+            "should contain DisplayName: {xml}"
+        );
+        assert!(xml.contains("</Owner>"), "should close Owner: {xml}");
+    }
+
+    #[test]
+    fn test_object_info_without_owner_omits_owner_element() {
+        let obj = ObjectInfo {
+            key: "photos/cat.jpg".into(),
+            last_modified: Utc::now(),
+            etag: "\"d41d8cd98f00b204e9800998ecf8427e\"".into(),
+            size: 1024,
+            storage_class: "STANDARD".into(),
+            owner: None,
+        };
+        let xml = to_xml_string(&obj);
+        assert!(
+            !xml.contains("<Owner>"),
+            "should NOT contain Owner element when None: {xml}"
+        );
     }
 
     // -- CreateBucketOutput ----------------------------------------------
