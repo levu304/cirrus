@@ -224,6 +224,29 @@ pub(crate) fn to_xml_string<T: serde::Serialize>(value: &T) -> String {
 // Core data types
 // ---------------------------------------------------------------------------
 
+/// AWS S3 StorageClass enum with all valid storage class values.
+///
+/// Ensures only valid storage class values can be used, preventing
+/// invalid values like 'INVALID_CLASS' from being set.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum StorageClass {
+    /// S3 Standard storage class
+    STANDARD,
+    /// S3 Standard-Infrequent Access storage class  
+    STANDARD_IA,
+    /// S3 One Zone-Infrequent Access storage class
+    ONEZONE_IA,
+    /// S3 Intelligent-Tiering storage class
+    INTELLIGENT_TIERING,
+    /// S3 Glacier storage class
+    GLACIER,
+    /// S3 Deep Archive storage class
+    DEEP_ARCHIVE,
+    /// S3 Glacier Instant Retrieval storage class
+    GLACIER_IR,
+}
+
 /// Bucket/object owner information.
 ///
 /// Used in ListBuckets and ListParts responses.
@@ -358,7 +381,7 @@ pub struct ObjectInfo {
     #[serde(rename = "Size")]
     pub size: i64,
     #[serde(rename = "StorageClass")]
-    pub storage_class: String,
+    pub storage_class: StorageClass,
     #[serde(rename = "Owner", skip_serializing_if = "Option::is_none")]
     pub owner: Option<Owner>,
 }
