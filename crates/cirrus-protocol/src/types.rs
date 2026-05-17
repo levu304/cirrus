@@ -507,6 +507,8 @@ pub struct ListPartsResult {
     pub max_parts: i32,
     #[serde(rename = "NextPartNumberMarker")]
     pub next_part_number_marker: String,
+    #[serde(rename = "PartNumberMarker")]
+    pub part_number_marker: String,
     #[serde(rename = "StorageClass")]
     pub storage_class: String,
     #[serde(rename = "Part", skip_serializing_if = "Vec::is_empty")]
@@ -931,6 +933,7 @@ mod tests {
             },
             max_parts: 1000,
             next_part_number_marker: String::new(),
+            part_number_marker: String::new(),
             storage_class: "STANDARD".into(),
             parts: vec![PartInfo {
                 part_number: 1,
@@ -949,6 +952,51 @@ mod tests {
         assert!(xml.contains("<Size>5242880</Size>"));
         assert!(xml.contains(
             "<NextPartNumberMarker></NextPartNumberMarker>"
+        ));
+        assert!(xml.contains(
+            "<PartNumberMarker></PartNumberMarker>"
+        ));
+    }
+
+    #[test]
+    fn test_list_parts_result_serialize_with_part_number_marker() {
+        let now = Utc::now();
+        let result = ListPartsResult {
+            bucket: "my-bucket".into(),
+            key: "large-file.zip".into(),
+            upload_id: "upload-xyz".into(),
+            initiator: Owner {
+                id: "init-id".into(),
+                display_name: "initiator".into(),
+            },
+            owner: Owner {
+                id: "owner-id".into(),
+                display_name: "bucket-owner".into(),
+            },
+            max_parts: 1000,
+            next_part_number_marker: "5".into(),
+            part_number_marker: "3".into(),  // Echo the request value
+            storage_class: "STANDARD".into(),
+            parts: vec![PartInfo {
+                part_number: 1,
+                last_modified: now,
+                etag: "\"etag-1\"".into(),
+                size: 5_242_880,
+            }],
+            is_truncated: false,
+        };
+        let xml = to_xml_string(&result);
+        assert!(xml.contains("<ListPartsResult>"));
+        assert!(xml.contains("<Initiator>"));
+        assert!(xml.contains("<Owner>"));
+        assert!(xml.contains("<Part>"));
+        assert!(xml.contains("<PartNumber>1</PartNumber>"));
+        assert!(xml.contains("<Size>5242880</Size>"));
+        assert!(xml.contains(
+            "<NextPartNumberMarker>5</NextPartNumberMarker>"
+        ));
+        assert!(xml.contains(
+            "<PartNumberMarker>3</PartNumberMarker>"
         ));
     }
 
