@@ -23,17 +23,23 @@ use std::collections::HashMap;
 #[allow(dead_code)]
 pub(crate) fn expand_empty_tags(xml: &str) -> String {
     let mut result = String::with_capacity(xml.len() + 64);
-    let len = xml.len();
-    let mut i = 0;
-    let bytes = xml.as_bytes();
+    let mut chars = xml.chars().peekable();
 
-    while i < len {
-        if bytes[i] == b'<' {
-            // Look for the closing `>` from this position
-            if let Some(gt_offset) = xml[i..].find('>') {
-                let tag_content = &xml[i + 1..i + gt_offset];
-                // Check if this is a self-closing tag (ends with `/`) with a simple name
-                if let Some(name) = tag_content.strip_suffix('/').map(str::trim) {
+    while let Some(ch) = chars.next() {
+        if ch == '<' {
+            // Collect the full tag until '>'
+            let mut tag = String::new();
+            let mut found_gt = false;
+            while let Some(c) = chars.next() {
+                if c == '>' {
+                    found_gt = true;
+                    break;
+                }
+                tag.push(c);
+            }
+            if found_gt {
+                // Check if this is a self-closing tag (ends with '/') with a simple name
+                if let Some(name) = tag.strip_suffix('/').map(str::trim) {
                     if !name.is_empty()
                         && name
                             .chars()
@@ -44,14 +50,19 @@ pub(crate) fn expand_empty_tags(xml: &str) -> String {
                         result.push_str("></");
                         result.push_str(name);
                         result.push('>');
-                        i += gt_offset + 1;
                         continue;
                     }
                 }
             }
+            // Not a recognized self-closing tag — emit the '<' and tag content as-is
+            result.push('<');
+            result.push_str(&tag);
+            if found_gt {
+                result.push('>');
+            }
+        } else {
+            result.push(ch);
         }
-        result.push(bytes[i] as char);
-        i += 1;
     }
     result
 }
@@ -718,6 +729,22 @@ mod tests {
         let input = r#"<Math>5 / 2</Math>"#;
         let output = expand_empty_tags(input);
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_expand_empty_tags_utf8() {
+        // Multi-byte UTF-8 characters must survive round-trip uncorrupted
+        let input = "<Key>照片/cat.jpg</Key><Tag/>";
+        let output = expand_empty_tags(input);
+        assert_eq!(output, "<Key>照片/cat.jpg</Key><Tag></Tag>");
+    }
+
+    #[test]
+    fn test_expand_empty_tags_utf8_with_empty_tag() {
+        // Empty string field alongside multi-byte UTF-8 in sibling element
+        let input = "<Name>café</Name><Empty/><Value>日本語</Value>";
+        let output = expand_empty_tags(input);
+        assert_eq!(output, "<Name>café</Name><Empty></Empty><Value>日本語</Value>");
     }
 
     // -- to_xml_string wrapper -------------------------------------------
