@@ -246,7 +246,6 @@ pub struct S3Object {
     pub etag: String,
     /// Default: `"binary/octet-stream"`
     pub content_type: String,
-    pub content_length: usize,
     pub last_modified: DateTime<Utc>,
     /// x-amz-meta-* metadata headers
     pub metadata: HashMap<String, String>,
@@ -255,6 +254,15 @@ pub struct S3Object {
 impl S3Object {
     /// Default content type for S3 objects when none is specified.
     pub const DEFAULT_CONTENT_TYPE: &'static str = "binary/octet-stream";
+
+    /// Returns the byte length of the object data.
+    ///
+    /// Derived from `data.len()` to guarantee the `Content-Length` header
+    /// always matches the actual body — eliminates the possibility of a
+    /// stale `content_length` field causing silent data corruption.
+    pub fn content_length(&self) -> usize {
+        self.data.len()
+    }
 }
 
 // ---------------------------------------------------------------------------
