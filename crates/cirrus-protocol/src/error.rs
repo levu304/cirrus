@@ -22,6 +22,14 @@ impl S3Error {
             ),
         }
     }
+
+    /// Creates an XML serialization error.
+    pub fn xml_serialization_error(details: &str) -> Self {
+        S3Error {
+            code: "InternalError".to_string(),
+            message: format!("XML serialization failed: {}", details),
+        }
+    }
 }
 
 impl fmt::Display for S3Error {

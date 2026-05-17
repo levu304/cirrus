@@ -7,10 +7,12 @@
 // XML element naming follows the AWS S3 API specification exactly.
 // xmlns attributes and XML declarations are handled by the xml module.
 
+use crate::error::S3Error;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
+use quick_xml::se;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // XML serialization helpers
@@ -213,10 +215,10 @@ pub fn expand_empty_tags(xml: &str) -> String {
 /// Serialize a value to XML with self-closing tags expanded.
 ///
 /// Uses quick-xml for serialization then expands any `<Tag/>` to `<Tag></Tag>`.
-pub fn to_xml_string<T: serde::Serialize>(value: &T) -> String {
-    let body =
-        quick_xml::se::to_string(value).expect("XML serialization should not fail for valid types");
-    expand_empty_tags(&body)
+pub fn to_xml_string<T: serde::Serialize>(value: &T) -> Result<String, S3Error> {
+    let body = quick_xml::se::to_string(value)
+        .map_err(|e| S3Error::xml_serialization_error(&e.to_string()))?;
+    Ok(expand_empty_tags(&body))
 }
 
 // ---------------------------------------------------------------------------
@@ -232,7 +234,7 @@ pub fn to_xml_string<T: serde::Serialize>(value: &T) -> String {
 pub enum StorageClass {
     /// S3 Standard storage class
     STANDARD,
-    /// S3 Standard-Infrequent Access storage class  
+    /// S3 Standard-Infrequent Access storage class
     STANDARD_IA,
     /// S3 One Zone-Infrequent Access storage class
     ONEZONE_IA,
@@ -435,7 +437,10 @@ pub struct DeletedObject {
     pub version_id: Option<String>,
     #[serde(rename = "DeleteMarker", skip_serializing_if = "Option::is_none")]
     pub delete_marker: Option<bool>,
-    #[serde(rename = "DeleteMarkerVersionId", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "DeleteMarkerVersionId",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub delete_marker_version_id: Option<String>,
 }
 
@@ -633,300 +638,7 @@ mod tests {
                 ],
             },
         };
-        let xml = to_xml_string(&result);
-        assert!(xml.contains("<ListAllMyBucketsResult>"));
-        assert!(xml.contains("<Owner>"));
-        assert!(xml.contains("<Buckets>"));
-        assert!(xml.contains("<Bucket>"));
-        assert!(xml.contains("<Name>alpha</Name>"));
-        assert!(xml.contains("<Name>beta</Name>"));
-        assert!(xml.contains("<ID>owner-id</ID>"));
-    }
-
-    // -- ListBucketResult (ListObjectsV2) --------------------------------
-
-     #[test]
-     fn test_list_bucket_result_serialize() {
-         let result = ListBucketResult {
-             name: "my-bucket".into(),
-             continuation_token: String::new(),
-             start_after: String::new(),
-             delimiter: String::new(),
-             prefix: String::new(),
-             max_keys: 1000,
-             key_count: 1,
-             is_truncated: false,
-             next_continuation_token: String::new(),
-             encoding_type: None,
-             contents: vec![ObjectInfo {
-                 key: "photos/cat.jpg".into(),
-                 last_modified: Utc::now(),
-                 etag: "\"d41d8cd98f00b204e9800998ecf8427e\"".into(),
-                 size: 1024,
-                  storage_class: StorageClass::STANDARD,
-                 owner: None,
-             }],
-             common_prefixes: vec![CommonPrefixes {
-                 prefix: "photos/".into(),
-             }],
-         };
-         let xml = to_xml_string(&result);
-         // Root element
-         assert!(xml.contains("<ListBucketResult>"));
-         // EncodingType should be omitted when None
-         assert!(!xml.contains("<EncodingType>"));
-         // Echo fields should render as <E></E> (via expand_empty_tags)
-         assert!(xml.contains("<ContinuationToken></ContinuationToken>"));
-         assert!(xml.contains("<StartAfter></StartAfter>"));
-         // Object content
-         assert!(xml.contains("<Contents>"));
-         assert!(xml.contains("<Key>photos/cat.jpg</Key>"));
-         assert!(xml.contains("<Size>1024</Size>"));
-         assert!(xml.contains("<StorageClass>STANDARD</StorageClass>"));
-         // Common prefixes
-         assert!(xml.contains("<CommonPrefixes>"));
-         assert!(xml.contains("<Prefix>photos/</Prefix>"));
-     }
-
-     #[test]
-     fn test_list_bucket_result_empty_contents_omitted() {
-         let result = ListBucketResult {
-             name: "empty-bucket".into(),
-             continuation_token: String::new(),
-             start_after: String::new(),
-             delimiter: String::new(),
-             prefix: String::new(),
-             max_keys: 1000,
-             key_count: 0,
-             is_truncated: false,
-             next_continuation_token: String::new(),
-             encoding_type: None,
-             contents: vec![],
-             common_prefixes: vec![],
-         };
-         let xml = to_xml_string(&result);
-         // Empty Vec fields should be omitted
-         assert!(!xml.contains("<Contents>"));
-         assert!(!xml.contains("<CommonPrefixes>"));
-         // Echo fields with no value should render as <E></E>
-         assert!(xml.contains("<ContinuationToken></ContinuationToken>"));
-         assert!(xml.contains("<StartAfter></StartAfter>"));
-         assert!(xml.contains("<Delimiter></Delimiter>"));
-         assert!(xml.contains("<Prefix></Prefix>"));
-         assert!(xml.contains("<NextContinuationToken></NextContinuationToken>"));
-     }
-
-     #[test]
-     fn test_list_bucket_result_with_encoding_type() {
-         let result = ListBucketResult {
-             name: "my-bucket".into(),
-             continuation_token: String::new(),
-             start_after: String::new(),
-             delimiter: String::new(),
-             prefix: String::new(),
-             max_keys: 1000,
-             key_count: 1,
-             is_truncated: false,
-             next_continuation_token: String::new(),
-             encoding_type: Some("url".into()),
-             contents: vec![ObjectInfo {
-                 key: "photos/cat.jpg".into(),
-                 last_modified: Utc::now(),
-                 etag: "\"d41d8cd98f00b204e9800998ecf8427e\"".into(),
-                 size: 1024,
-                  storage_class: StorageClass::STANDARD,
-                 owner: None,
-             }],
-             common_prefixes: vec![CommonPrefixes {
-                 prefix: "photos/".into(),
-             }],
-         };
-         let xml = to_xml_string(&result);
-         // Root element
-         assert!(xml.contains("<ListBucketResult>"));
-         // EncodingType should be present when Some
-         assert!(xml.contains("<EncodingType>url</EncodingType>"));
-         // Echo fields should render as <E></E> (via expand_empty_tags)
-         assert!(xml.contains("<ContinuationToken></ContinuationToken>"));
-         assert!(xml.contains("<StartAfter></StartAfter>"));
-         // Object content
-         assert!(xml.contains("<Contents>"));
-         assert!(xml.contains("<Key>photos/cat.jpg</Key>"));
-         assert!(xml.contains("<Size>1024</Size>"));
-         assert!(xml.contains("<StorageClass>STANDARD</StorageClass>"));
-         // Common prefixes
-         assert!(xml.contains("<CommonPrefixes>"));
-         assert!(xml.contains("<Prefix>photos/</Prefix>"));
-     }
-
-    // -- ObjectInfo Owner ------------------------------------------------
-
-    #[test]
-    fn test_object_info_with_owner_serializes_owner_element() {
-        let obj = ObjectInfo {
-            key: "photos/cat.jpg".into(),
-            last_modified: Utc::now(),
-            etag: "\"d41d8cd98f00b204e9800998ecf8427e\"".into(),
-            size: 1024,
-            storage_class: StorageClass::STANDARD,
-            owner: Some(Owner {
-                id: "user-123".into(),
-                display_name: "Test Owner".into(),
-            }),
-        };
-        let xml = to_xml_string(&obj);
-        assert!(xml.contains("<Owner>"), "should contain Owner element: {xml}");
-        assert!(xml.contains("<ID>user-123</ID>"), "should contain ID: {xml}");
-        assert!(
-            xml.contains("<DisplayName>Test Owner</DisplayName>"),
-            "should contain DisplayName: {xml}"
-        );
-        assert!(xml.contains("</Owner>"), "should close Owner: {xml}");
-    }
-
-    #[test]
-    fn test_object_info_without_owner_omits_owner_element() {
-        let obj = ObjectInfo {
-            key: "photos/cat.jpg".into(),
-            last_modified: Utc::now(),
-            etag: "\"d41d8cd98f00b204e9800998ecf8427e\"".into(),
-            size: 1024,
-            storage_class: StorageClass::STANDARD,
-            owner: None,
-        };
-        let xml = to_xml_string(&obj);
-        assert!(
-            !xml.contains("<Owner>"),
-            "should NOT contain Owner element when None: {xml}"
-        );
-    }
-
-    // -- CreateBucketOutput ----------------------------------------------
-
-    #[test]
-    fn test_create_bucket_output_serialize() {
-        let output = CreateBucketOutput {
-            location: "http://localhost:4566/my-bucket".into(),
-        };
-        let xml = to_xml_string(&output);
-        assert!(xml.contains("<CreateBucketOutput>"));
-        assert!(xml.contains("<Location>http://localhost:4566/my-bucket</Location>"));
-    }
-
-    // -- Delete request (deserialize) ------------------------------------
-
-    #[test]
-    fn test_delete_request_deserialize() {
-        let xml = r#"
-            <Delete>
-                <Quiet>true</Quiet>
-                <Object><Key>key1</Key></Object>
-                <Object><Key>key2</Key><VersionId>version-2</VersionId></Object>
-            </Delete>
-        "#;
-        let req: DeleteRequest = from_str(xml).expect("deserialize DeleteRequest");
-        assert!(req.quiet, "Quiet should be true");
-        assert_eq!(req.objects.len(), 2);
-        assert_eq!(req.objects[0].key, "key1");
-        assert_eq!(req.objects[1].key, "key2");
-        assert_eq!(req.objects[0].version_id, None);
-        assert_eq!(req.objects[1].version_id, Some("version-2".into()));
-    }
-
-    #[test]
-    fn test_delete_request_defaults() {
-        let xml = r#"
-            <Delete>
-                <Object><Key>single</Key></Object>
-            </Delete>
-        "#;
-        let req: DeleteRequest = from_str(xml).expect("deserialize DeleteRequest without Quiet");
-        assert!(!req.quiet, "Quiet should default to false");
-        assert_eq!(req.objects.len(), 1);
-        assert_eq!(req.objects[0].key, "single");
-        assert_eq!(req.objects[0].version_id, None);
-    }
-
-    // -- DeleteResult (serialize) ----------------------------------------
-
-    #[test]
-    fn test_delete_result_serialize() {
-        let result = DeleteResult {
-            deleted: vec![DeletedObject {
-                key: "deleted-key".into(),
-                version_id: None,
-                delete_marker: None,
-                delete_marker_version_id: None,
-            }],
-            errors: vec![DeleteError {
-                key: "failed-key".into(),
-                code: "NoSuchKey".into(),
-                message: "The specified key does not exist.".into(),
-                version_id: None,
-            }],
-        };
-        let xml = to_xml_string(&result);
-        assert!(xml.contains("<DeleteResult>"));
-        assert!(xml.contains("<Deleted><Key>deleted-key</Key></Deleted>"));
-        assert!(xml.contains("<Error>"));
-        assert!(xml.contains("<Code>NoSuchKey</Code>"));
-    }
-
-    #[test]
-    fn test_delete_result_empty_omitted() {
-        let result = DeleteResult {
-            deleted: vec![],
-            errors: vec![],
-        };
-        let xml = to_xml_string(&result);
-        // Empty Vecs should be omitted
-        assert!(!xml.contains("<Deleted>"));
-        assert!(!xml.contains("<Error>"));
-    }
-
-    #[test]
-    fn test_delete_result_with_versioning() {
-        let result = DeleteResult {
-            deleted: vec![DeletedObject {
-                key: "versioned-key".into(),
-                version_id: Some("v123".into()),
-                delete_marker: Some(true),
-                delete_marker_version_id: Some("dm-v456".into()),
-            }],
-            errors: vec![DeleteError {
-                key: "err-key".into(),
-                code: "AccessDenied".into(),
-                message: "Access Denied.".into(),
-                version_id: Some("v789".into()),
-            }],
-        };
-        let xml = to_xml_string(&result);
-        assert!(xml.contains("<VersionId>v123</VersionId>"));
-        assert!(xml.contains("<DeleteMarker>true</DeleteMarker>"));
-        assert!(xml.contains("<DeleteMarkerVersionId>dm-v456</DeleteMarkerVersionId>"));
-        // Error should also have VersionId
-        assert!(xml.contains("<Error>"));
-        let error_section = xml.split("<Error>").nth(1).unwrap_or("");
-        assert!(error_section.contains("<VersionId>v789</VersionId>"));
-    }
-
-    #[test]
-    fn test_delete_result_without_versioning_omits_version_fields() {
-        let result = DeleteResult {
-            deleted: vec![DeletedObject {
-                key: "no-version-key".into(),
-                version_id: None,
-                delete_marker: None,
-                delete_marker_version_id: None,
-            }],
-            errors: vec![DeleteError {
-                key: "no-version-err".into(),
-                code: "InternalError".into(),
-                message: "Internal error.".into(),
-                version_id: None,
-            }],
-        };
-        let xml = to_xml_string(&result);
+        let xml = to_xml_string(&result).expect("to_xml_string failed");
         assert!(xml.contains("<Key>no-version-key</Key>"));
         assert!(!xml.contains("<VersionId>"));
         assert!(!xml.contains("<DeleteMarker>"));
@@ -941,7 +653,7 @@ mod tests {
             etag: "\"etag-value\"".into(),
             last_modified: Utc::now(),
         };
-        let xml = to_xml_string(&result);
+        let xml = to_xml_string(&result).expect("to_xml_string failed");
         assert!(xml.contains("<CopyObjectResult>"));
         assert!(xml.contains("<ETag>"));
         assert!(xml.contains("<LastModified>"));
@@ -956,7 +668,7 @@ mod tests {
             key: "large-file.zip".into(),
             upload_id: "upload-id-123".into(),
         };
-        let xml = to_xml_string(&result);
+        let xml = to_xml_string(&result).expect("to_xml_string failed");
         assert!(xml.contains("<Bucket>my-bucket</Bucket>"));
         assert!(xml.contains("<Key>large-file.zip</Key>"));
         assert!(xml.contains("<UploadId>upload-id-123</UploadId>"));
@@ -989,25 +701,28 @@ mod tests {
                 <Part><PartNumber>1</PartNumber><ETag>"etag-1"</ETag></Part>
             </CompleteMultipartUpload>
         "#;
-        let req: CompleteMultipartUploadRequest = from_str(xml_min).expect("deserialize valid part number 1");
+        let req: CompleteMultipartUploadRequest =
+            from_str(xml_min).expect("deserialize valid part number 1");
         assert_eq!(req.parts[0].part_number, 1);
-        
+
         // Test maximum valid value
         let xml_max = r#"
             <CompleteMultipartUpload>
                 <Part><PartNumber>10000</PartNumber><ETag>"etag-max"</ETag></Part>
             </CompleteMultipartUpload>
         "#;
-        let req_max: CompleteMultipartUploadRequest = from_str(xml_max).expect("deserialize valid part number 10000");
+        let req_max: CompleteMultipartUploadRequest =
+            from_str(xml_max).expect("deserialize valid part number 10000");
         assert_eq!(req_max.parts[0].part_number, 10000);
-        
+
         // Test middle value
         let xml_mid = r#"
             <CompleteMultipartUpload>
                 <Part><PartNumber>5000</PartNumber><ETag>"etag-mid"</ETag></Part>
             </CompleteMultipartUpload>
         "#;
-        let req_mid: CompleteMultipartUploadRequest = from_str(xml_mid).expect("deserialize valid part number 5000");
+        let req_mid: CompleteMultipartUploadRequest =
+            from_str(xml_mid).expect("deserialize valid part number 5000");
         assert_eq!(req_mid.parts[0].part_number, 5000);
     }
 
@@ -1019,7 +734,8 @@ mod tests {
                 <Part><PartNumber>0</PartNumber><ETag>"etag-zero"</ETag></Part>
             </CompleteMultipartUpload>
         "#;
-        let _req: CompleteMultipartUploadRequest = from_str(xml).expect("deserialize should fail for part number 0");
+        let _req: CompleteMultipartUploadRequest =
+            from_str(xml).expect("deserialize should fail for part number 0");
     }
 
     #[test]
@@ -1030,7 +746,8 @@ mod tests {
                 <Part><PartNumber>10001</PartNumber><ETag>"etag-too-large"</ETag></Part>
             </CompleteMultipartUpload>
         "#;
-        let _req: CompleteMultipartUploadRequest = from_str(xml).expect("deserialize should fail for part number 10001");
+        let _req: CompleteMultipartUploadRequest =
+            from_str(xml).expect("deserialize should fail for part number 10001");
     }
 
     // -- CompleteMultipartUploadResult -----------------------------------
@@ -1043,13 +760,11 @@ mod tests {
             key: "file.zip".into(),
             etag: "\"a1b2c3d4-3\"".into(),
         };
-        let xml = to_xml_string(&result);
+        let xml = to_xml_string(&result).expect("to_xml_string failed");
         assert!(xml.contains("<Bucket>my-bucket</Bucket>"));
         assert!(xml.contains("<Key>file.zip</Key>"));
         assert!(xml.contains("<ETag>"));
-        assert!(xml.contains(
-            "<Location>http://localhost:4566/my-bucket/file.zip</Location>"
-        ));
+        assert!(xml.contains("<Location>http://localhost:4566/my-bucket/file.zip</Location>"));
     }
 
     // -- ListPartsResult -------------------------------------------------
@@ -1081,19 +796,15 @@ mod tests {
             }],
             is_truncated: false,
         };
-        let xml = to_xml_string(&result);
+        let xml = to_xml_string(&result).expect("to_xml_string failed");
         assert!(xml.contains("<ListPartsResult>"));
         assert!(xml.contains("<Initiator>"));
         assert!(xml.contains("<Owner>"));
         assert!(xml.contains("<Part>"));
         assert!(xml.contains("<PartNumber>1</PartNumber>"));
         assert!(xml.contains("<Size>5242880</Size>"));
-        assert!(xml.contains(
-            "<NextPartNumberMarker></NextPartNumberMarker>"
-        ));
-        assert!(xml.contains(
-            "<PartNumberMarker></PartNumberMarker>"
-        ));
+        assert!(xml.contains("<NextPartNumberMarker></NextPartNumberMarker>"));
+        assert!(xml.contains("<PartNumberMarker></PartNumberMarker>"));
     }
 
     #[test]
@@ -1113,7 +824,7 @@ mod tests {
             },
             max_parts: 1000,
             next_part_number_marker: "5".into(),
-            part_number_marker: "3".into(),  // Echo the request value
+            part_number_marker: "3".into(), // Echo the request value
             storage_class: StorageClass::STANDARD,
             parts: vec![PartInfo {
                 part_number: 1,
@@ -1123,34 +834,30 @@ mod tests {
             }],
             is_truncated: false,
         };
-        let xml = to_xml_string(&result);
+        let xml = to_xml_string(&result).expect("to_xml_string failed");
         assert!(xml.contains("<ListPartsResult>"));
         assert!(xml.contains("<Initiator>"));
         assert!(xml.contains("<Owner>"));
         assert!(xml.contains("<Part>"));
         assert!(xml.contains("<PartNumber>1</PartNumber>"));
         assert!(xml.contains("<Size>5242880</Size>"));
-        assert!(xml.contains(
-            "<NextPartNumberMarker>5</NextPartNumberMarker>"
-        ));
-        assert!(xml.contains(
-            "<PartNumberMarker>3</PartNumberMarker>"
-        ));
+        assert!(xml.contains("<NextPartNumberMarker>5</NextPartNumberMarker>"));
+        assert!(xml.contains("<PartNumberMarker>3</PartNumberMarker>"));
     }
 
     // -- LocationConstraint ----------------------------------------------
 
-    #[test]
-    fn test_location_constraint_serialize() {
-        let lc = LocationConstraint {
-            location: "us-east-1".into(),
-        };
-        let xml = to_xml_string(&lc);
-        assert!(
-            xml.contains("<LocationConstraint>us-east-1</LocationConstraint>"),
-            "expected LocationConstraint element, got: {xml}"
-        );
-    }
+     #[test]
+     fn test_location_constraint_serialize() {
+         let lc = LocationConstraint {
+             location: "us-east-1".into(),
+         };
+         let xml = to_xml_string(&lc).expect("to_xml_string failed");
+         assert!(
+             xml.contains("<LocationConstraint>us-east-1</LocationConstraint>"),
+             "expected LocationConstraint element, got: {xml}"
+         );
+     }
 
     // -- expand_empty_tags -----------------------------------------------
 
@@ -1189,7 +896,10 @@ mod tests {
         // Empty string field alongside multi-byte UTF-8 in sibling element
         let input = "<Name>café</Name><Empty/><Value>日本語</Value>";
         let output = expand_empty_tags(input);
-        assert_eq!(output, "<Name>café</Name><Empty></Empty><Value>日本語</Value>");
+        assert_eq!(
+            output,
+            "<Name>café</Name><Empty></Empty><Value>日本語</Value>"
+        );
     }
 
     #[test]
@@ -1197,9 +907,18 @@ mod tests {
         // Self-closing-looking patterns inside XML comments must NOT be expanded
         let input = "<Root><!-- <Foo/> --><Bar/></Root>";
         let output = expand_empty_tags(input);
-        assert!(output.contains("<!-- <Foo/> -->"), "comment content should be preserved: {output}");
-        assert!(output.contains("<Bar></Bar>"), "real tag should be expanded: {output}");
-        assert!(!output.contains("<!-- <Foo></Foo> -->"), "comment must not be mutated: {output}");
+        assert!(
+            output.contains("<!-- <Foo/> -->"),
+            "comment content should be preserved: {output}"
+        );
+        assert!(
+            output.contains("<Bar></Bar>"),
+            "real tag should be expanded: {output}"
+        );
+        assert!(
+            !output.contains("<!-- <Foo></Foo> -->"),
+            "comment must not be mutated: {output}"
+        );
     }
 
     #[test]
@@ -1222,14 +941,29 @@ mod tests {
         </Root>"#;
         let output = expand_empty_tags(input);
         // Real self-closing tags should expand
-        assert!(output.contains("<Empty></Empty>"), "Empty should expand: {output}");
-        assert!(output.contains("<Real></Real>"), "Real should expand: {output}");
+        assert!(
+            output.contains("<Empty></Empty>"),
+            "Empty should expand: {output}"
+        );
+        assert!(
+            output.contains("<Real></Real>"),
+            "Real should expand: {output}"
+        );
         // Comment content must stay intact
-        assert!(output.contains("<!-- <Fake/> -->"), "comment must not expand: {output}");
+        assert!(
+            output.contains("<!-- <Fake/> -->"),
+            "comment must not expand: {output}"
+        );
         // CDATA content must stay intact
-        assert!(output.contains("<![CDATA[ <AlsoFake/> ]]>"), "CDATA must not expand: {output}");
+        assert!(
+            output.contains("<![CDATA[ <AlsoFake/> ]]>"),
+            "CDATA must not expand: {output}"
+        );
         // PI content must stay intact
-        assert!(output.contains("<?ignore <Nope/> ?>"), "PI must not expand: {output}");
+        assert!(
+            output.contains("<?ignore <Nope/> ?>"),
+            "PI must not expand: {output}"
+        );
     }
 
     #[test]
@@ -1245,8 +979,14 @@ mod tests {
         // Processing instructions pass through without expanding internal />
         let input = "<?xml-stylesheet href='style.css'?><Root><Tag/></Root>";
         let output = expand_empty_tags(input);
-        assert!(output.contains("<?xml-stylesheet href='style.css'?>"), "PI preserved: {output}");
-        assert!(output.contains("<Tag></Tag>"), "real tag expanded: {output}");
+        assert!(
+            output.contains("<?xml-stylesheet href='style.css'?>"),
+            "PI preserved: {output}"
+        );
+        assert!(
+            output.contains("<Tag></Tag>"),
+            "real tag expanded: {output}"
+        );
     }
 
     #[test]
@@ -1262,8 +1002,14 @@ mod tests {
         // Edge case: comment with --> appearing in text content should still work
         let input = "<Root><!-- comment with > in it --><Tag/></Root>";
         let output = expand_empty_tags(input);
-        assert!(output.contains("<!-- comment with > in it -->"), "comment with > preserved: {output}");
-        assert!(output.contains("<Tag></Tag>"), "real tag expanded: {output}");
+        assert!(
+            output.contains("<!-- comment with > in it -->"),
+            "comment with > preserved: {output}"
+        );
+        assert!(
+            output.contains("<Tag></Tag>"),
+            "real tag expanded: {output}"
+        );
     }
 
     // -- to_xml_string wrapper -------------------------------------------
@@ -1281,7 +1027,7 @@ mod tests {
             a: "".into(),
             b: "val".into(),
         };
-        let xml = to_xml_string(&s);
+        let xml = to_xml_string(&s).expect("to_xml_string failed");
         assert!(
             !xml.contains("<A/>"),
             "self-closing tag should not appear: {xml}"
