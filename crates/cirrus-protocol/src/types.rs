@@ -415,7 +415,7 @@ pub struct DeleteRequest {
 pub struct DeleteObject {
     #[serde(rename = "Key")]
     pub key: String,
-    #[serde(rename = "VersionId", default)]
+    #[serde(rename = "VersionId")]
     pub version_id: Option<String>,
 }
 
