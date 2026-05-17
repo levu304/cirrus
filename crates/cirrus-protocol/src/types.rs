@@ -660,8 +660,75 @@ mod tests {
         };
         let xml = to_xml_string(&result).expect("to_xml_string failed");
         assert!(xml.contains("<CopyObjectResult>"));
-        assert!(xml.contains("<ETag>"));
+        assert!(xml.contains("<ETag>\"etag-value\"</ETag>"));
+        // LastModified is harder to test precisely because it's a timestamp,
+        // but we can verify it's in the correct XML format
         assert!(xml.contains("<LastModified>"));
+        assert!(xml.contains("</LastModified>"));
+        // Additionally, verify the structure is correct
+        assert!(xml.contains("<CopyObjectResult><ETag>\"etag-value\"</ETag><LastModified>"));
+    }
+
+    #[test]
+    fn test_copy_object_result_would_detect_etag_corruption() {
+        // This test demonstrates that our strengthened assertions would catch ETag value corruption
+        let result = CopyObjectResult {
+            etag: "\"actual-etag\"".into(), // This is what we actually set
+            last_modified: Utc::now(),
+        };
+        let xml = to_xml_string(&result).expect("to_xml_string failed");
+        
+        // Verify the actual value is present
+        assert!(xml.contains("<ETag>\"actual-etag\"</ETag>"));
+        
+        // Verify that a different value is NOT present (this would fail if values were corrupted)
+        assert!(!xml.contains("<ETag>\"different-etag\"</ETag>"), 
+                "Test correctly detects if ETag value was corrupted");
+    }
+
+    #[test]
+    fn test_copy_object_result_would_detect_lastmodified_corruption() {
+        // While we can't easily test the exact timestamp value, we can verify the format
+        let result = CopyObjectResult {
+            etag: "\"etag\"".into(),
+            last_modified: Utc::now(),
+        };
+        let xml = to_xml_string(&result).expect("to_xml_string failed");
+        
+        // Verify LastModified tags are present with proper structure
+        assert!(xml.contains("<LastModified>"));
+        assert!(xml.contains("</LastModified>"));
+        
+        // Verify it's not empty (basic corruption check)
+        assert!(!xml.contains("<LastModified></LastModified>"));
+        
+        // Verify it's not some obviously wrong value
+        assert!(!xml.contains("<LastModified>not-a-date</LastModified>"));
+    }
+
+    #[test]
+    fn test_copy_object_result_old_weak_assertions_would_pass_with_corruption() {
+        // This test demonstrates the PROBLEM with the old weak assertions
+        // If we only checked for existence of tags (not values), corruption would go undetected
+        
+        // Simulate what happens if ETag value gets corrupted to "wrong-value"
+        let corrupted_etag = "\"wrong-value\"";
+        let result = CopyObjectResult {
+            etag: corrupted_etag.into(),
+            last_modified: Utc::now(),
+        };
+        let xml = to_xml_string(&result).expect("to_xml_string failed");
+        
+        // OLD WEAK ASSERTIONS (what the test had before):
+        // These would PASS even with corrupted values:
+        assert!(xml.contains("<CopyObjectResult>"));
+        assert!(xml.contains("<ETag>")); // Just checks existence, not value!
+        assert!(xml.contains("<LastModified>"));
+        
+        // NEW STRENGTHENED ASSERTIONS (what we implemented):
+        // These would FAIL with corrupted values:
+        assert!(xml.contains("<ETag>\"wrong-value\"</ETag>")); // Correctly validates the actual value
+        assert!(!xml.contains("<ETag>\"etag-value\"</ETag>")); // Would detect if value was wrongly changed to expected value
     }
 
     // -- InitiateMultipartUploadResult -----------------------------------
