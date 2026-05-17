@@ -618,32 +618,37 @@ mod tests {
 
     // -- ListAllMyBucketsResult ------------------------------------------
 
-    #[test]
-    fn test_list_all_my_buckets_result_serialize() {
-        let result = ListAllMyBucketsResult {
-            owner: Owner {
-                id: "owner-id".into(),
-                display_name: "bucket-owner".into(),
-            },
-            buckets: Buckets {
-                bucket: vec![
-                    BucketInfo {
-                        name: "alpha".into(),
-                        creation_date: Utc::now(),
-                    },
-                    BucketInfo {
-                        name: "beta".into(),
-                        creation_date: Utc::now(),
-                    },
-                ],
-            },
-        };
-        let xml = to_xml_string(&result).expect("to_xml_string failed");
-        assert!(xml.contains("<Key>no-version-key</Key>"));
-        assert!(!xml.contains("<VersionId>"));
-        assert!(!xml.contains("<DeleteMarker>"));
-        assert!(!xml.contains("<DeleteMarkerVersionId>"));
-    }
+     #[test]
+     fn test_list_all_my_buckets_result_serialize() {
+         let result = ListAllMyBucketsResult {
+             owner: Owner {
+                 id: "owner-id".into(),
+                 display_name: "bucket-owner".into(),
+             },
+             buckets: Buckets {
+                 bucket: vec![
+                     BucketInfo {
+                         name: "alpha".into(),
+                         creation_date: Utc::now(),
+                     },
+                     BucketInfo {
+                         name: "beta".into(),
+                         creation_date: Utc::now(),
+                     },
+                 ],
+             },
+         };
+         let xml = to_xml_string(&result).expect("to_xml_string failed");
+         assert!(xml.contains("<ListAllMyBucketsResult>"));
+         assert!(xml.contains("<Owner>"));
+         assert!(xml.contains("<ID>owner-id</ID>"));
+         assert!(xml.contains("<DisplayName>bucket-owner</DisplayName>"));
+         assert!(xml.contains("<Buckets>"));
+         assert!(xml.contains("<Bucket>"));
+         assert!(xml.contains("<Name>alpha</Name>"));
+         assert!(xml.contains("<Name>beta</Name>"));
+         assert!(xml.contains("<CreationDate>"));
+     }
 
     // -- CopyObjectResult ------------------------------------------------
 
