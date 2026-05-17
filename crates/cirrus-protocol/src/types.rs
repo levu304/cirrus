@@ -20,8 +20,7 @@ use std::collections::HashMap;
 /// quick-xml serializes empty `String` values as `<Tag/>` (self-closing).
 /// Some S3 clients expect `<Tag></Tag>` instead. This function converts
 /// all self-closing tags to the open/close form.
-#[allow(dead_code)]
-pub(crate) fn expand_empty_tags(xml: &str) -> String {
+pub fn expand_empty_tags(xml: &str) -> String {
     let mut result = String::with_capacity(xml.len() + 64);
     let mut chars = xml.chars().peekable();
 
@@ -213,8 +212,7 @@ pub(crate) fn expand_empty_tags(xml: &str) -> String {
 /// Serialize a value to XML with self-closing tags expanded.
 ///
 /// Uses quick-xml for serialization then expands any `<Tag/>` to `<Tag></Tag>`.
-#[allow(dead_code)]
-pub(crate) fn to_xml_string<T: serde::Serialize>(value: &T) -> String {
+pub fn to_xml_string<T: serde::Serialize>(value: &T) -> String {
     let body =
         quick_xml::se::to_string(value).expect("XML serialization should not fail for valid types");
     expand_empty_tags(&body)
@@ -535,7 +533,7 @@ pub struct ListPartsResult {
     #[serde(rename = "PartNumberMarker")]
     pub part_number_marker: String,
     #[serde(rename = "StorageClass")]
-    pub storage_class: String,
+    pub storage_class: StorageClass,
     #[serde(rename = "Part", skip_serializing_if = "Vec::is_empty")]
     pub parts: Vec<PartInfo>,
     #[serde(rename = "IsTruncated")]
@@ -649,7 +647,7 @@ mod tests {
                  last_modified: Utc::now(),
                  etag: "\"d41d8cd98f00b204e9800998ecf8427e\"".into(),
                  size: 1024,
-                 storage_class: "STANDARD".into(),
+                  storage_class: StorageClass::STANDARD,
                  owner: None,
              }],
              common_prefixes: vec![CommonPrefixes {
@@ -720,7 +718,7 @@ mod tests {
                  last_modified: Utc::now(),
                  etag: "\"d41d8cd98f00b204e9800998ecf8427e\"".into(),
                  size: 1024,
-                 storage_class: "STANDARD".into(),
+                  storage_class: StorageClass::STANDARD,
                  owner: None,
              }],
              common_prefixes: vec![CommonPrefixes {
@@ -754,7 +752,7 @@ mod tests {
             last_modified: Utc::now(),
             etag: "\"d41d8cd98f00b204e9800998ecf8427e\"".into(),
             size: 1024,
-            storage_class: "STANDARD".into(),
+            storage_class: StorageClass::STANDARD,
             owner: Some(Owner {
                 id: "user-123".into(),
                 display_name: "Test Owner".into(),
@@ -777,7 +775,7 @@ mod tests {
             last_modified: Utc::now(),
             etag: "\"d41d8cd98f00b204e9800998ecf8427e\"".into(),
             size: 1024,
-            storage_class: "STANDARD".into(),
+            storage_class: StorageClass::STANDARD,
             owner: None,
         };
         let xml = to_xml_string(&obj);
@@ -1006,7 +1004,7 @@ mod tests {
             max_parts: 1000,
             next_part_number_marker: String::new(),
             part_number_marker: String::new(),
-            storage_class: "STANDARD".into(),
+            storage_class: StorageClass::STANDARD,
             parts: vec![PartInfo {
                 part_number: 1,
                 last_modified: now,
@@ -1048,7 +1046,7 @@ mod tests {
             max_parts: 1000,
             next_part_number_marker: "5".into(),
             part_number_marker: "3".into(),  // Echo the request value
-            storage_class: "STANDARD".into(),
+            storage_class: StorageClass::STANDARD,
             parts: vec![PartInfo {
                 part_number: 1,
                 last_modified: now,
