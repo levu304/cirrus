@@ -7,7 +7,7 @@
 // XML element naming follows the AWS S3 API specification exactly.
 // xmlns attributes and XML declarations are handled by the xml module.
 
-use crate::error::S3Error;
+use crate::error::{AwsError, AwsErrorKind};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use quick_xml::se;
@@ -215,9 +215,11 @@ pub fn expand_empty_tags(xml: &str) -> String {
 /// Serialize a value to XML with self-closing tags expanded.
 ///
 /// Uses quick-xml for serialization then expands any `<Tag/>` to `<Tag></Tag>`.
-pub fn to_xml_string<T: serde::Serialize>(value: &T) -> Result<String, S3Error> {
+pub fn to_xml_string<T: serde::Serialize>(value: &T) -> Result<String, AwsError> {
     let body = quick_xml::se::to_string(value)
-        .map_err(|e| S3Error::xml_serialization_error(&e.to_string()))?;
+        .map_err(|e| AwsError::from(AwsErrorKind::XmlSerializationError {
+            details: e.to_string(),
+        }))?;
     Ok(expand_empty_tags(&body))
 }
 
