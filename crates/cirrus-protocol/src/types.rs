@@ -328,6 +328,8 @@ pub struct ListBucketResult {
     pub start_after: String,
     #[serde(rename = "Delimiter")]
     pub delimiter: String,
+    #[serde(rename = "EncodingType", skip_serializing_if = "Option::is_none")]
+    pub encoding_type: Option<String>,
     #[serde(rename = "Prefix")]
     pub prefix: String,
     #[serde(rename = "MaxKeys")]
@@ -606,72 +608,119 @@ mod tests {
 
     // -- ListBucketResult (ListObjectsV2) --------------------------------
 
-    #[test]
-    fn test_list_bucket_result_serialize() {
-        let result = ListBucketResult {
-            name: "my-bucket".into(),
-            continuation_token: String::new(),
-            start_after: String::new(),
-            delimiter: String::new(),
-            prefix: String::new(),
-            max_keys: 1000,
-            key_count: 1,
-            is_truncated: false,
-            next_continuation_token: String::new(),
-            contents: vec![ObjectInfo {
-                key: "photos/cat.jpg".into(),
-                last_modified: Utc::now(),
-                etag: "\"d41d8cd98f00b204e9800998ecf8427e\"".into(),
-                size: 1024,
-                storage_class: "STANDARD".into(),
-                owner: None,
-            }],
-            common_prefixes: vec![CommonPrefixes {
-                prefix: "photos/".into(),
-            }],
-        };
-        let xml = to_xml_string(&result);
-        // Root element
-        assert!(xml.contains("<ListBucketResult>"));
-        // Echo fields should render as <E></E> (via expand_empty_tags)
-        assert!(xml.contains("<ContinuationToken></ContinuationToken>"));
-        assert!(xml.contains("<StartAfter></StartAfter>"));
-        // Object content
-        assert!(xml.contains("<Contents>"));
-        assert!(xml.contains("<Key>photos/cat.jpg</Key>"));
-        assert!(xml.contains("<Size>1024</Size>"));
-        assert!(xml.contains("<StorageClass>STANDARD</StorageClass>"));
-        // Common prefixes
-        assert!(xml.contains("<CommonPrefixes>"));
-        assert!(xml.contains("<Prefix>photos/</Prefix>"));
-    }
+     #[test]
+     fn test_list_bucket_result_serialize() {
+         let result = ListBucketResult {
+             name: "my-bucket".into(),
+             continuation_token: String::new(),
+             start_after: String::new(),
+             delimiter: String::new(),
+             prefix: String::new(),
+             max_keys: 1000,
+             key_count: 1,
+             is_truncated: false,
+             next_continuation_token: String::new(),
+             encoding_type: None,
+             contents: vec![ObjectInfo {
+                 key: "photos/cat.jpg".into(),
+                 last_modified: Utc::now(),
+                 etag: "\"d41d8cd98f00b204e9800998ecf8427e\"".into(),
+                 size: 1024,
+                 storage_class: "STANDARD".into(),
+                 owner: None,
+             }],
+             common_prefixes: vec![CommonPrefixes {
+                 prefix: "photos/".into(),
+             }],
+         };
+         let xml = to_xml_string(&result);
+         // Root element
+         assert!(xml.contains("<ListBucketResult>"));
+         // EncodingType should be omitted when None
+         assert!(!xml.contains("<EncodingType>"));
+         // Echo fields should render as <E></E> (via expand_empty_tags)
+         assert!(xml.contains("<ContinuationToken></ContinuationToken>"));
+         assert!(xml.contains("<StartAfter></StartAfter>"));
+         // Object content
+         assert!(xml.contains("<Contents>"));
+         assert!(xml.contains("<Key>photos/cat.jpg</Key>"));
+         assert!(xml.contains("<Size>1024</Size>"));
+         assert!(xml.contains("<StorageClass>STANDARD</StorageClass>"));
+         // Common prefixes
+         assert!(xml.contains("<CommonPrefixes>"));
+         assert!(xml.contains("<Prefix>photos/</Prefix>"));
+     }
 
-    #[test]
-    fn test_list_bucket_result_empty_contents_omitted() {
-        let result = ListBucketResult {
-            name: "empty-bucket".into(),
-            continuation_token: String::new(),
-            start_after: String::new(),
-            delimiter: String::new(),
-            prefix: String::new(),
-            max_keys: 1000,
-            key_count: 0,
-            is_truncated: false,
-            next_continuation_token: String::new(),
-            contents: vec![],
-            common_prefixes: vec![],
-        };
-        let xml = to_xml_string(&result);
-        // Empty Vec fields should be omitted
-        assert!(!xml.contains("<Contents>"));
-        assert!(!xml.contains("<CommonPrefixes>"));
-        // Echo fields with no value should render as <E></E>
-        assert!(xml.contains("<ContinuationToken></ContinuationToken>"));
-        assert!(xml.contains("<StartAfter></StartAfter>"));
-        assert!(xml.contains("<Delimiter></Delimiter>"));
-        assert!(xml.contains("<Prefix></Prefix>"));
-        assert!(xml.contains("<NextContinuationToken></NextContinuationToken>"));
-    }
+     #[test]
+     fn test_list_bucket_result_empty_contents_omitted() {
+         let result = ListBucketResult {
+             name: "empty-bucket".into(),
+             continuation_token: String::new(),
+             start_after: String::new(),
+             delimiter: String::new(),
+             prefix: String::new(),
+             max_keys: 1000,
+             key_count: 0,
+             is_truncated: false,
+             next_continuation_token: String::new(),
+             encoding_type: None,
+             contents: vec![],
+             common_prefixes: vec![],
+         };
+         let xml = to_xml_string(&result);
+         // Empty Vec fields should be omitted
+         assert!(!xml.contains("<Contents>"));
+         assert!(!xml.contains("<CommonPrefixes>"));
+         // Echo fields with no value should render as <E></E>
+         assert!(xml.contains("<ContinuationToken></ContinuationToken>"));
+         assert!(xml.contains("<StartAfter></StartAfter>"));
+         assert!(xml.contains("<Delimiter></Delimiter>"));
+         assert!(xml.contains("<Prefix></Prefix>"));
+         assert!(xml.contains("<NextContinuationToken></NextContinuationToken>"));
+     }
+
+     #[test]
+     fn test_list_bucket_result_with_encoding_type() {
+         let result = ListBucketResult {
+             name: "my-bucket".into(),
+             continuation_token: String::new(),
+             start_after: String::new(),
+             delimiter: String::new(),
+             prefix: String::new(),
+             max_keys: 1000,
+             key_count: 1,
+             is_truncated: false,
+             next_continuation_token: String::new(),
+             encoding_type: Some("url".into()),
+             contents: vec![ObjectInfo {
+                 key: "photos/cat.jpg".into(),
+                 last_modified: Utc::now(),
+                 etag: "\"d41d8cd98f00b204e9800998ecf8427e\"".into(),
+                 size: 1024,
+                 storage_class: "STANDARD".into(),
+                 owner: None,
+             }],
+             common_prefixes: vec![CommonPrefixes {
+                 prefix: "photos/".into(),
+             }],
+         };
+         let xml = to_xml_string(&result);
+         // Root element
+         assert!(xml.contains("<ListBucketResult>"));
+         // EncodingType should be present when Some
+         assert!(xml.contains("<EncodingType>url</EncodingType>"));
+         // Echo fields should render as <E></E> (via expand_empty_tags)
+         assert!(xml.contains("<ContinuationToken></ContinuationToken>"));
+         assert!(xml.contains("<StartAfter></StartAfter>"));
+         // Object content
+         assert!(xml.contains("<Contents>"));
+         assert!(xml.contains("<Key>photos/cat.jpg</Key>"));
+         assert!(xml.contains("<Size>1024</Size>"));
+         assert!(xml.contains("<StorageClass>STANDARD</StorageClass>"));
+         // Common prefixes
+         assert!(xml.contains("<CommonPrefixes>"));
+         assert!(xml.contains("<Prefix>photos/</Prefix>"));
+     }
 
     // -- ObjectInfo Owner ------------------------------------------------
 
