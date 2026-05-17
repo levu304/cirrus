@@ -407,6 +407,12 @@ pub struct DeleteResult {
 pub struct DeletedObject {
     #[serde(rename = "Key")]
     pub key: String,
+    #[serde(rename = "VersionId", skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
+    #[serde(rename = "DeleteMarker", skip_serializing_if = "Option::is_none")]
+    pub delete_marker: Option<bool>,
+    #[serde(rename = "DeleteMarkerVersionId", skip_serializing_if = "Option::is_none")]
+    pub delete_marker_version_id: Option<String>,
 }
 
 /// A delete error entry for an object that could not be deleted.
@@ -418,6 +424,8 @@ pub struct DeleteError {
     pub code: String,
     #[serde(rename = "Message")]
     pub message: String,
+    #[serde(rename = "VersionId", skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -756,11 +764,17 @@ mod tests {
     #[test]
     fn test_delete_result_serialize() {
         let result = DeleteResult {
-            deleted: vec![DeletedObject { key: "deleted-key".into() }],
+            deleted: vec![DeletedObject {
+                key: "deleted-key".into(),
+                version_id: None,
+                delete_marker: None,
+                delete_marker_version_id: None,
+            }],
             errors: vec![DeleteError {
                 key: "failed-key".into(),
                 code: "NoSuchKey".into(),
                 message: "The specified key does not exist.".into(),
+                version_id: None,
             }],
         };
         let xml = to_xml_string(&result);
@@ -780,6 +794,55 @@ mod tests {
         // Empty Vecs should be omitted
         assert!(!xml.contains("<Deleted>"));
         assert!(!xml.contains("<Error>"));
+    }
+
+    #[test]
+    fn test_delete_result_with_versioning() {
+        let result = DeleteResult {
+            deleted: vec![DeletedObject {
+                key: "versioned-key".into(),
+                version_id: Some("v123".into()),
+                delete_marker: Some(true),
+                delete_marker_version_id: Some("dm-v456".into()),
+            }],
+            errors: vec![DeleteError {
+                key: "err-key".into(),
+                code: "AccessDenied".into(),
+                message: "Access Denied.".into(),
+                version_id: Some("v789".into()),
+            }],
+        };
+        let xml = to_xml_string(&result);
+        assert!(xml.contains("<VersionId>v123</VersionId>"));
+        assert!(xml.contains("<DeleteMarker>true</DeleteMarker>"));
+        assert!(xml.contains("<DeleteMarkerVersionId>dm-v456</DeleteMarkerVersionId>"));
+        // Error should also have VersionId
+        assert!(xml.contains("<Error>"));
+        let error_section = xml.split("<Error>").nth(1).unwrap_or("");
+        assert!(error_section.contains("<VersionId>v789</VersionId>"));
+    }
+
+    #[test]
+    fn test_delete_result_without_versioning_omits_version_fields() {
+        let result = DeleteResult {
+            deleted: vec![DeletedObject {
+                key: "no-version-key".into(),
+                version_id: None,
+                delete_marker: None,
+                delete_marker_version_id: None,
+            }],
+            errors: vec![DeleteError {
+                key: "no-version-err".into(),
+                code: "InternalError".into(),
+                message: "Internal error.".into(),
+                version_id: None,
+            }],
+        };
+        let xml = to_xml_string(&result);
+        assert!(xml.contains("<Key>no-version-key</Key>"));
+        assert!(!xml.contains("<VersionId>"));
+        assert!(!xml.contains("<DeleteMarker>"));
+        assert!(!xml.contains("<DeleteMarkerVersionId>"));
     }
 
     // -- CopyObjectResult ------------------------------------------------

@@ -8,8 +8,5 @@
         "architect-reviewer": {
             "model": "opencode/qwen3.6-plus-free",
         },
-        "debugger": {
-            "model": "opencode/qwen3.6-plus-free",
-        },
     },
 }
