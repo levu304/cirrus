@@ -198,7 +198,17 @@ pub fn aws_error_response(err: AwsError) -> Response<Body> {
         )
         .header("Content-Type", "application/xml")
         .body(Body::from(xml_body))
-        .expect("aws_error_response: valid static Response")
+        .unwrap_or_else(|e| {
+            tracing::error!(
+                error = %e,
+                status_code = status_code,
+                "aws_error_response: failed to build response"
+            );
+            Response::builder()
+                .status(500)
+                .body(Body::from("Internal Server Error"))
+                .unwrap()
+        })
 }
 
 #[cfg(test)]
