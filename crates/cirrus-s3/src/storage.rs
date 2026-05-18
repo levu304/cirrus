@@ -774,9 +774,8 @@ impl Storage for DefaultStorage {
                 prev_part_number = part.part_number;
             }
 
-            // Drop the RefMut before returning, so the lock is not held during
+            // RefMut is dropped at block end — lock is released before
             // concatenation, hashing, or object creation.
-            drop(upload);
             parts_data
         };
 
@@ -879,7 +878,7 @@ impl Storage for DefaultStorage {
 
         let part_infos: Vec<PartInfo> = all_matching[..take]
             .iter()
-                .map(|(pn, p)| PartInfo {
+            .map(|(pn, p)| PartInfo {
                 part_number: *pn,
                 last_modified: p.last_modified,
                 etag: p.etag.clone(),
