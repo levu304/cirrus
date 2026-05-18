@@ -738,38 +738,51 @@ impl Storage for DefaultStorage {
             .get(bucket)
             .ok_or(S3Error::NoSuchBucket)?;
 
-        let upload = bkt
-            .multipart_uploads
-            .get_mut(upload_id)
-            .ok_or(S3Error::NoSuchUpload)?;
+        // Validate parts and collect data while holding the RefMut.
+        // We drop it before any expensive operations (concatenation, hashing).
+        let all_parts: Vec<Bytes> = {
+            let upload = bkt
+                .multipart_uploads
+                .get_mut(upload_id)
+                .ok_or(S3Error::NoSuchUpload)?;
 
-        if upload.key != key {
-            return Err(S3Error::NoSuchUpload);
-        }
+            if upload.key != key {
+                return Err(S3Error::NoSuchUpload);
+            }
 
-        // Validate: parts must be in strictly increasing order, and each
-        // must exist with a matching ETag.
-        let mut prev_part_number: u32 = 0;
-        for part in parts {
-            if part.part_number <= prev_part_number {
-                return Err(S3Error::InvalidPartOrder);
+            // Validate: parts must be in strictly increasing order, and each
+            // must exist with a matching ETag.
+            let mut prev_part_number: u32 = 0;
+            let mut parts_data: Vec<Bytes> = Vec::with_capacity(parts.len());
+            for part in parts {
+                if part.part_number <= prev_part_number {
+                    return Err(S3Error::InvalidPartOrder);
+                }
+                let stored = upload
+                    .parts
+                    .get(&part.part_number)
+                    .ok_or(S3Error::InvalidPart)?;
+                if stored.etag != part.etag {
+                    return Err(S3Error::InvalidPart);
+                }
+                // Clone is O(1): Bytes is Arc<[u8]>.
+                parts_data.push(stored.data.clone());
+                prev_part_number = part.part_number;
             }
-            let stored = upload
-                .parts
-                .get(&part.part_number)
-                .ok_or(S3Error::InvalidPart)?;
-            if stored.etag != part.etag {
-                return Err(S3Error::InvalidPart);
-            }
-            prev_part_number = part.part_number;
-        }
+
+            // Drop the RefMut before returning, so the lock is not held during
+            // concatenation, hashing, or object creation.
+            drop(upload);
+            parts_data
+        };
+
+        // RefMut is now released. No lock contention for other operations
+        // on the same upload_id.
 
         // Concatenate all part data in order.
         let mut all_data: Vec<u8> = Vec::new();
-        for part in parts {
-            if let Some(stored) = upload.parts.get(&part.part_number) {
-                all_data.extend_from_slice(&stored.data);
-            }
+        for part_data in &all_parts {
+            all_data.extend_from_slice(part_data);
         }
 
         // Compute final ETag: MD5 of concatenated data with "-N" suffix.
@@ -784,8 +797,6 @@ impl Storage for DefaultStorage {
             metadata: std::collections::HashMap::new(),
         };
 
-        // Drop the upload reference before removing it from the map.
-        drop(upload);
         bkt.multipart_uploads.remove(upload_id);
 
         // AP-P6: Do NOT increment total_bytes here. The individual parts'
