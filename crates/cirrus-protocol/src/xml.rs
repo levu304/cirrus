@@ -85,7 +85,7 @@ pub fn format_etag<T: AsRef<[u8]>>(data: T) -> String {
 /// # Arguments
 ///
 /// * `value` - The value to serialize (must implement `serde::Serialize`)
-// * `root_name` - The expected root element name, used to target the xmlns injection
+/// * `root_name` - The expected root element name, used to target the xmlns injection
 ///
 /// # Returns
 ///
@@ -99,8 +99,9 @@ pub fn serialize<T: serde::Serialize>(value: &T, root_name: &str) -> Result<Stri
 ///
 /// Handles:
 /// - Root tags with no attributes: `<Foo>` → `<Foo xmlns="...">`
-/// - Root tags with existing attributes: `<Foo bar="x">` → `<Foo xmlns="..." bar="x">`
+/// - Root tags with existing attributes (including xmlns): `<Foo bar="x">` → `<Foo xmlns="..." bar="x">`
 /// - Self-closing root tags: `<Foo/>` → `<Foo xmlns="..."></Foo>` (expanded + xmlns)
+/// - Root tags with existing xmlns: `<Foo xmlns="old">` → `<Foo xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` (replaces xmlns)
 fn inject_xmlns(xml: &str, root_name: &str) -> String {
     let xmlns_attr = format!(" xmlns=\"{}\"", S3_XML_NAMESPACE);
 
@@ -118,7 +119,55 @@ fn inject_xmlns(xml: &str, root_name: &str) -> String {
     }
 
     // Handle normal opening tag: <RootName> or <RootName attr="...">
-    // Use replacen with the opening bracket to avoid matching child elements
+    // Find the position of the opening tag
+    if let Some(pos) = xml.find(&open_tag) {
+        // Find the end of the root opening tag (either > or />)
+        let mut end_pos = pos + open_tag.len();
+        while end_pos < xml.len() {
+            if xml[end_pos..].starts_with('>') || xml[end_pos..].starts_with("/>") {
+                break;
+            }
+            end_pos += 1;
+        }
+
+        if end_pos < xml.len() {
+            // Extract the root opening tag content
+            let root_tag = &xml[pos..end_pos];
+            
+            // Check if xmlns attribute already exists
+            if let Some(xmlns_pos) = root_tag.find("xmlns=\"") {
+                // Find the end of the xmlns value (closing quote)
+                let mut value_end = xmlns_pos + 7; // Skip past "xmlns=\""
+                while value_end < root_tag.len() {
+                    if root_tag[value_end..].starts_with('"') {
+                        break;
+                    }
+                    value_end += 1;
+                }
+
+                if value_end < root_tag.len() {
+                    // Replace the xmlns value with the correct S3 namespace
+                    let mut result = String::with_capacity(xml.len());
+                    result.push_str(&xml[..pos]); // Before the root tag
+                    result.push_str(&root_tag[..xmlns_pos]); // Before xmlns="
+                    result.push_str("xmlns=\""); // The xmlns=" prefix
+                    result.push_str(S3_XML_NAMESPACE); // The correct namespace
+                    result.push_str(&root_tag[value_end..]); // After the closing quote
+                    result.push_str(&xml[end_pos..]); // After the root tag
+                    return result;
+                }
+            } else {
+                // No existing xmlns, insert before the closing >
+                let mut result = String::with_capacity(xml.len() + xmlns_attr.len());
+                result.push_str(&xml[..end_pos]);
+                result.push_str(&xmlns_attr);
+                result.push_str(&xml[end_pos..]);
+                return result;
+            }
+        }
+    }
+
+    // Fallback to original behavior if we can't find the tag
     let replacement = format!("<{}{}", root_name, xmlns_attr);
     xml.replacen(&open_tag, &replacement, 1)
 }
@@ -223,13 +272,23 @@ mod tests {
     }
 
     #[test]
-    fn test_inject_xmlns_does_not_duplicate() {
-        // If xmlns already present (edge case), replacen only replaces first occurrence
+    fn test_inject_xmlns_replaces_existing() {
+        // If xmlns already present, it should be replaced with the correct S3 namespace
         let input = "<Root xmlns=\"old\"><Child/></Root>";
         let output = inject_xmlns(input, "Root");
 
-        // Should replace the first occurrence
+        // Should have exactly one xmlns attribute with the correct value
+        let xmlns_count = output.matches("xmlns=").count();
+        assert_eq!(xmlns_count, 1, "Should have exactly one xmlns attribute");
+        
+        // Should contain the correct S3 namespace
         assert!(output.contains("xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\""));
+        
+        // Should NOT contain the old xmlns value
+        assert!(!output.contains("xmlns=\"old\""));
+        
+        // Should preserve child elements
+        assert!(output.contains("<Child/>"));
     }
 
     #[test]
