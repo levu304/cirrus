@@ -72,12 +72,12 @@ impl AwsError {
 
         format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-             <Error>\n\
-             <Code>{code}</Code>\n\
-             <Message>{message}</Message>\n\
-             {request_id}\
-             {host_id}\
-             </Error>",
+              <Error xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n\
+              <Code>{code}</Code>\n\
+              <Message>{message}</Message>\n\
+              {request_id}\
+              {host_id}\
+              </Error>",
             code = code,
             message = message,
             request_id = request_id,
