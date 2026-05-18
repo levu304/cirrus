@@ -37,10 +37,6 @@ pub enum AddressError {
     /// A URL-encoded path segment could not be decoded.
     #[error("failed to decode URL-encoded segment: {0}")]
     DecodeError(#[from] std::string::FromUtf8Error),
-
-    /// The request is structurally malformed.
-    #[error("malformed request: {0}")]
-    MalformedRequest(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +141,22 @@ fn try_extract_service_from_query(query: &str) -> Option<String> {
 // Address resolution
 // ---------------------------------------------------------------------------
 
+/// Strip the port suffix from a host string, handling IPv6 bracket notation.
+///
+/// * `"host:9000"` → `"host"`
+/// * `"[::1]:9000"` → `"::1"`
+/// * `"localhost"` → `"localhost"`
+fn strip_port(host: &str) -> &str {
+    if let Some(bracket_end) = host.find(']') {
+        // IPv6 bracketed host: return the content inside brackets.
+        // host is like "[::1]:9000" — we want "::1".
+        &host[1..bracket_end]
+    } else {
+        // Non-bracketed host: split on ':' to remove port.
+        host.split(':').next().unwrap_or(host)
+    }
+}
+
 /// Parse the bucket and key from an S3 request's `Host` header and path.
 ///
 /// Supports two addressing modes:
@@ -162,23 +174,6 @@ fn try_extract_service_from_query(query: &str) -> Option<String> {
 /// Returns [`AddressError::MissingHost`] when `host` is empty,
 /// [`AddressError::MissingBucket`] when no bucket can be parsed, and
 /// [`AddressError::DecodeError`] when a percent-encoded segment is invalid.
-
-/// Strip the port suffix from a host string, handling IPv6 bracket notation.
-///
-/// * `"host:9000"` → `"host"`
-/// * `"[::1]:9000"` → `"::1"`
-/// * `"localhost"` → `"localhost"`
-fn strip_port(host: &str) -> &str {
-    if let Some(bracket_end) = host.find(']') {
-        // IPv6 bracketed host: return the content inside brackets.
-        // host is like "[::1]:9000" — we want "::1".
-        &host[1..bracket_end]
-    } else {
-        // Non-bracketed host: split on ':' to remove port.
-        host.split(':').next().unwrap_or(host)
-    }
-}
-
 pub fn resolve_address(host: &str, path: &str) -> Result<(String, String), AddressError> {
     if host.is_empty() {
         return Err(AddressError::MissingHost);
@@ -257,7 +252,7 @@ fn resolve_virtual_hosted(
 fn resolve_path_style(path: &str) -> Result<(String, String), AddressError> {
     let trimmed = path.trim_start_matches('/');
 
-    if trimmed.is_empty() || trimmed == "/" {
+    if trimmed.is_empty() {
         return Err(AddressError::MissingBucket);
     }
 
@@ -598,6 +593,57 @@ mod tests {
         let (bucket, key) = resolve_address("localhost", "/bucket/key").unwrap();
         assert_eq!(bucket, "bucket");
         assert_eq!(key, "key");
+    }
+
+    // -- classify_host_style indirect tests ------------------------------------
+
+    #[test]
+    fn test_regional_virtual_hosted() {
+        // 5 host labels: "bucket.s3.eu-west-1.amazonaws.com"
+        // First label "bucket" does NOT start with "s3" → virtual-hosted.
+        // Verifies that regional endpoints work in virtual-hosted mode.
+        let (bucket, key) =
+            resolve_address("bucket.s3.eu-west-1.amazonaws.com", "/key").unwrap();
+        assert_eq!(bucket, "bucket");
+        assert_eq!(key, "key");
+    }
+
+    #[test]
+    fn test_s3_website_endpoint_path_style() {
+        // 3 host labels: "s3-website-us-east-1.amazonaws.com"
+        // First label starts with "s3" → path-style.
+        // Verifies that s3-website-* endpoints are correctly treated as path-style.
+        let (bucket, key) =
+            resolve_address("s3-website-us-east-1.amazonaws.com", "/bucket/key").unwrap();
+        assert_eq!(bucket, "bucket");
+        assert_eq!(key, "key");
+    }
+
+    #[test]
+    fn test_two_label_host_with_port_path_style() {
+        // 2 host labels after port stripping: "bucket.localhost:9000" → "bucket.localhost"
+        // 0..=2 labels → path-style (conservative heuristic).
+        // Verifies the 2-label boundary of classify_host_style.
+        let (bucket, key) =
+            resolve_address("bucket.localhost:9000", "/bucket/key").unwrap();
+        assert_eq!(bucket, "bucket");
+        assert_eq!(key, "key");
+    }
+
+    #[test]
+    fn test_bucket_starting_with_s3_misclassification() {
+        // KNOWN LIMITATION: "s3photos.s3.amazonaws.com" has 4 labels where the
+        // first ("s3photos") starts with "s3". classify_host_style returns
+        // PathStyle, so the bucket is read from the first path segment ("key")
+        // rather than from the host label ("s3photos").
+        //
+        // When the intent was virtual-hosted (bucket=s3photos, key=key), this
+        // yields the wrong result: ("key", "") instead of ("s3photos", "key").
+        // This is the documented edge case in the function's doc comment.
+        let (bucket, key) =
+            resolve_address("s3photos.s3.amazonaws.com", "/key").unwrap();
+        assert_eq!(bucket, "key");
+        assert_eq!(key, "");
     }
 
     // -- Authorization header parsing helpers ----------------------------------
