@@ -86,7 +86,10 @@ impl ServiceRegistry {
     /// The name is typically the first path segment of the request URI
     /// (e.g., `"s3"`, `"sts"`, `"iam"`).
     pub fn register(&self, name: impl Into<String>, service: Arc<dyn AwsService>) {
-        self.inner.insert(name.into(), service);
+        let name = name.into();
+        if let Some(_prev) = self.inner.insert(name.clone(), service) {
+            tracing::warn!(service = %name, "Service registration overwrote existing service");
+        }
     }
 
     /// Look up a registered service by name.
