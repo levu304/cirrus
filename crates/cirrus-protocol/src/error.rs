@@ -176,6 +176,8 @@ pub enum AwsErrorKind {
         /// Details about the serialization error.
         details: String,
     },
+    /// The request body length did not match the declared Content-Length.
+    IncompleteBody,
 }
 
 impl AwsErrorKind {
@@ -202,6 +204,7 @@ impl AwsErrorKind {
             Self::InvalidStorageClass { .. } => "InvalidStorageClass",
             Self::InternalError { .. } => "InternalError",
             Self::XmlSerializationError { .. } => "XmlSerializationError",
+            Self::IncompleteBody => "IncompleteBody",
         }
     }
 
@@ -228,6 +231,7 @@ impl AwsErrorKind {
             Self::InvalidStorageClass { .. } => 400,
             Self::InternalError { .. } => 500,
             Self::XmlSerializationError { .. } => 500,
+            Self::IncompleteBody => 400,
         }
     }
 
@@ -297,6 +301,9 @@ impl AwsErrorKind {
             }
             Self::XmlSerializationError { details } => {
                 format!("XML serialization failed: {}", details)
+            }
+            Self::IncompleteBody => {
+                "The request body length did not match the declared Content-Length.".to_string()
             }
         }
     }
