@@ -25,12 +25,20 @@ pub const S3_XML_NAMESPACE: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
 ///
 /// The escaped string with XML entities replaced
 pub fn xml_escape(input: &str) -> String {
-    input
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace("\"", "&quot;")
-        .replace("'", "&apos;")
+    // Pre-allocate with input length as a reasonable estimate (avoids reallocation
+    // in the common case of few or no special characters).
+    let mut result = String::with_capacity(input.len());
+    for c in input.chars() {
+        match c {
+            '&' => result.push_str("&amp;"),
+            '<' => result.push_str("&lt;"),
+            '>' => result.push_str("&gt;"),
+            '"' => result.push_str("&quot;"),
+            '\'' => result.push_str("&apos;"),
+            _ => result.push(c),
+        }
+    }
+    result
 }
 
 /// Format a timestamp as ISO 8601 with milliseconds
