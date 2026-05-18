@@ -1,6 +1,6 @@
 // Cirrus protocol XML serialization helpers.
 //
-use crate::error::S3Error;
+use crate::error::AwsError;
 /// Provides the canonical `serialize` function that produces AWS S3-compatible
 /// XML responses with the required xmlns namespace on the root element.
 use crate::types::to_xml_string;
@@ -25,7 +25,7 @@ pub const S3_XML_NAMESPACE: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
 /// # Returns
 ///
 /// A complete XML string with xmlns on the root element and expanded empty tags.
-pub fn serialize<T: serde::Serialize>(value: &T, root_name: &str) -> Result<String, S3Error> {
+pub fn serialize<T: serde::Serialize>(value: &T, root_name: &str) -> Result<String, AwsError> {
     let body = to_xml_string(value)?;
     Ok(inject_xmlns(&body, root_name))
 }
