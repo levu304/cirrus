@@ -162,13 +162,31 @@ fn try_extract_service_from_query(query: &str) -> Option<String> {
 /// Returns [`AddressError::MissingHost`] when `host` is empty,
 /// [`AddressError::MissingBucket`] when no bucket can be parsed, and
 /// [`AddressError::DecodeError`] when a percent-encoded segment is invalid.
+
+/// Strip the port suffix from a host string, handling IPv6 bracket notation.
+///
+/// * `"host:9000"` → `"host"`
+/// * `"[::1]:9000"` → `"::1"`
+/// * `"localhost"` → `"localhost"`
+fn strip_port(host: &str) -> &str {
+    if let Some(bracket_end) = host.find(']') {
+        // IPv6 bracketed host: return the content inside brackets.
+        // host is like "[::1]:9000" — we want "::1".
+        &host[1..bracket_end]
+    } else {
+        // Non-bracketed host: split on ':' to remove port.
+        host.split(':').next().unwrap_or(host)
+    }
+}
+
 pub fn resolve_address(host: &str, path: &str) -> Result<(String, String), AddressError> {
     if host.is_empty() {
         return Err(AddressError::MissingHost);
     }
 
     // Strip any port suffix (e.g. "host:9000" → "host").
-    let host = host.split(':').next().unwrap_or(host);
+    // Handles IPv6 bracketed hosts like "[::1]:9000" → "::1".
+    let host = strip_port(host);
 
     let host_parts: Vec<&str> = host.split('.').collect();
 
@@ -544,6 +562,30 @@ mod tests {
         // 3+ host labels → virtual-hosted, bucket is the first subdomain.
         let (bucket, key) =
             resolve_address("bucket.s3.example.com:9000", "/key").unwrap();
+        assert_eq!(bucket, "bucket");
+        assert_eq!(key, "key");
+    }
+
+    #[test]
+    fn test_ipv6_loopback_path_style() {
+        // IPv6 loopback with port, path-style request.
+        let (bucket, key) =
+            resolve_address("[::1]:9000", "/bucket/key").unwrap();
+        assert_eq!(bucket, "bucket");
+        assert_eq!(key, "key");
+    }
+
+    #[test]
+    fn test_ipv6_loopback_no_bucket() {
+        // IPv6 with no bucket in path should return MissingBucket (not crash).
+        let err = resolve_address("[::1]:9000", "/").unwrap_err();
+        assert!(matches!(err, AddressError::MissingBucket));
+    }
+
+    #[test]
+    fn test_ipv6_loopback_no_port() {
+        // IPv6 without port should also work.
+        let (bucket, key) = resolve_address("[::1]", "/bucket/key").unwrap();
         assert_eq!(bucket, "bucket");
         assert_eq!(key, "key");
     }
