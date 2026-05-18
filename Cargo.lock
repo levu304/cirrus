@@ -266,9 +266,11 @@ dependencies = [
 name = "cirrus-router"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "bytes",
  "cirrus-protocol",
+ "dashmap",
  "http",
  "http-body",
  "http-body-util",
