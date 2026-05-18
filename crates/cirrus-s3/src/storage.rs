@@ -351,8 +351,12 @@ impl Storage for DefaultStorage {
             .ok_or(S3Error::NoSuchBucket)?;
 
         if !bucket.objects.is_empty() || !bucket.multipart_uploads.is_empty() {
-            // Re-insert so the bucket isn't silently lost.
-            self.buckets.insert(name.to_string(), bucket);
+            // Re-insert so the bucket isn't silently lost. Use entry().or_insert()
+            // to avoid overwriting a bucket a concurrent create_bucket inserted
+            // between our remove() and this re-insert (cirrus-5os).
+            self.buckets
+                .entry(name.to_string())
+                .or_insert(bucket);
             return Err(S3Error::BucketNotEmpty);
         }
 
@@ -571,7 +575,7 @@ impl Storage for DefaultStorage {
 
             // Check for delimiter grouping.
             if !delimiter.is_empty() {
-                let remaining = &key[prefix.len()..];
+                let remaining = key.get(prefix.len()..).unwrap_or("");
                 if let Some(pos) = remaining.find(delimiter) {
                     let cp = format!("{}{}", prefix, &remaining[..=pos]);
                     seen_prefixes.insert(cp.clone());
