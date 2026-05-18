@@ -167,10 +167,11 @@ pub async fn fallback_handler(
             }
         }
     } else {
+        tracing::warn!(service_name = %service_name, "Request for unregistered service");
         aws_error_response(
             AwsError::new(AwsErrorKind::NotImplemented)
                 .request_id("")
-                .host_id(format!("Service '{service_name}' not registered")),
+                .host_id("Service unavailable"),
         )
     }
 }
