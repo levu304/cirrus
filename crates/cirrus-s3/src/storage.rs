@@ -1350,7 +1350,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_complete_multipart_upload_wrong_order() {
+    async fn test_complete_multipart_upload_duplicate_parts() {
         let storage = test_storage();
         with_bucket(&storage, "mp-bucket").await;
         let upload_id = storage
@@ -1377,6 +1377,46 @@ mod tests {
                     Part {
                         part_number: 1,
                         etag: etag1.clone(),
+                    },
+                    Part {
+                        part_number: 1,
+                        etag: etag1,
+                    },
+                ],
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(_err, S3Error::InvalidPartOrder));
+    }
+
+    #[tokio::test]
+    async fn test_complete_multipart_upload_wrong_order() {
+        let storage = test_storage();
+        with_bucket(&storage, "mp-bucket").await;
+        let upload_id = storage
+            .create_multipart_upload("mp-bucket", "f.txt")
+            .await
+            .expect("create_multipart_upload");
+
+        let etag1 = storage
+            .upload_part("mp-bucket", "f.txt", &upload_id, 1, Bytes::from("a"))
+            .await
+            .expect("upload_part 1");
+        let etag2 = storage
+            .upload_part("mp-bucket", "f.txt", &upload_id, 2, Bytes::from("b"))
+            .await
+            .expect("upload_part 2");
+
+        // Descending part numbers must fail with InvalidPartOrder.
+        let _err = storage
+            .complete_multipart_upload(
+                "mp-bucket",
+                "f.txt",
+                &upload_id,
+                &[
+                    Part {
+                        part_number: 2,
+                        etag: etag2,
                     },
                     Part {
                         part_number: 1,
