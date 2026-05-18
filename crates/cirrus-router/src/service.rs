@@ -12,6 +12,7 @@ use axum::body::Body;
 use axum::extract::State;
 use cirrus_protocol::error::{AwsError, AwsErrorKind};
 use dashmap::DashMap;
+use tracing;
 use http::{Request, Response, StatusCode};
 use std::sync::Arc;
 
@@ -141,7 +142,8 @@ pub async fn fallback_handler(
         .trim_start_matches('/')
         .split('/')
         .next()
-        .unwrap_or("");
+        .unwrap_or("")
+        .to_string();
 
     if service_name.is_empty() {
         return aws_error_response(
@@ -151,10 +153,18 @@ pub async fn fallback_handler(
         );
     }
 
-    if let Some(service) = registry.get(service_name) {
+    if let Some(service) = registry.get(&service_name) {
         match service.handle(req).await {
             Ok(response) => response,
-            Err(err) => aws_error_response(err),
+            Err(err) => {
+                tracing::error!(
+                    service_name = %service_name,
+                    error_code = %err.error_code(),
+                    status = %err.status_code(),
+                    "Service handler error",
+                );
+                aws_error_response(err)
+            }
         }
     } else {
         aws_error_response(
