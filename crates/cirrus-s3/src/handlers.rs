@@ -185,6 +185,7 @@ pub async fn handle_put_object<S: Storage>(
     bucket: &str,
     key: &str,
     content_type: &str,
+    metadata: HashMap<String, String>,
     body: Bytes,
 ) -> Result<Response<Body>, AwsError> {
     let content_type = if content_type.is_empty() {
@@ -199,7 +200,7 @@ pub async fn handle_put_object<S: Storage>(
         etag: etag.clone(),
         content_type: content_type.to_string(),
         last_modified: chrono::Utc::now(),
-        metadata: HashMap::new(),
+        metadata,
     };
 
     storage.put_object(bucket, key, object).await.map_err(|e| {
@@ -231,7 +232,8 @@ pub async fn handle_get_object<S: Storage>(
 
     let object = result.object;
     let request_id = uuid::Uuid::new_v4().to_string();
-    Response::builder()
+
+    let mut builder = Response::builder()
         .status(200)
         .header("Content-Type", &object.content_type)
         .header("Content-Length", object.content_length().to_string())
@@ -239,7 +241,13 @@ pub async fn handle_get_object<S: Storage>(
         .header("Last-Modified", format_http_date(object.last_modified))
         .header("Accept-Ranges", "bytes")
         .header("x-amz-request-id", &request_id)
-        .header("x-amz-id-2", "cirrus-v0.1.0")
+        .header("x-amz-id-2", "cirrus-v0.1.0");
+
+    for (key, value) in &object.metadata {
+        builder = builder.header(format!("x-amz-meta-{}", key), value);
+    }
+
+    builder
         .body(Body::from(object.data))
         .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
             details: Some(format!("response build failed: {e}")),
@@ -258,7 +266,8 @@ pub async fn handle_head_object<S: Storage>(
 
     let object = result.object;
     let request_id = uuid::Uuid::new_v4().to_string();
-    Response::builder()
+
+    let mut builder = Response::builder()
         .status(200)
         .header("Content-Type", &object.content_type)
         .header("Content-Length", object.content_length().to_string())
@@ -266,7 +275,13 @@ pub async fn handle_head_object<S: Storage>(
         .header("Last-Modified", format_http_date(object.last_modified))
         .header("Accept-Ranges", "bytes")
         .header("x-amz-request-id", &request_id)
-        .header("x-amz-id-2", "cirrus-v0.1.0")
+        .header("x-amz-id-2", "cirrus-v0.1.0");
+
+    for (key, value) in &object.metadata {
+        builder = builder.header(format!("x-amz-meta-{}", key), value);
+    }
+
+    builder
         .body(Body::empty())
         .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
             details: Some(format!("response build failed: {e}")),
@@ -509,7 +524,7 @@ mod tests {
         storage.create_bucket("put-test").await.unwrap();
 
         let body = Bytes::from("hello world");
-        let resp = handle_put_object(&storage, "put-test", "hello.txt", "text/plain", body.clone())
+        let resp = handle_put_object(&storage, "put-test", "hello.txt", "text/plain", HashMap::new(), body.clone())
             .await
             .expect("put_object should succeed");
         assert_eq!(resp.status(), 200);
@@ -548,7 +563,7 @@ mod tests {
         storage.create_bucket("put-test-2").await.unwrap();
 
         let body = Bytes::from("test data");
-        handle_put_object(&storage, "put-test-2", "f", "", body)
+        handle_put_object(&storage, "put-test-2", "f", "", HashMap::new(), body)
             .await
             .expect("put_object should succeed");
 
@@ -567,6 +582,7 @@ mod tests {
             "nonexistent",
             "key",
             "text/plain",
+            HashMap::new(),
             Bytes::from("data"),
         )
         .await
@@ -583,7 +599,7 @@ mod tests {
         storage.create_bucket("get-test").await.unwrap();
 
         let body = Bytes::from("hello world from get");
-        handle_put_object(&storage, "get-test", "file.txt", "application/json", body.clone())
+        handle_put_object(&storage, "get-test", "file.txt", "application/json", HashMap::new(), body.clone())
             .await
             .expect("put_object");
 
@@ -642,6 +658,43 @@ mod tests {
         assert_eq!(err.error_code(), "NoSuchBucket");
     }
 
+    #[tokio::test]
+    async fn test_get_object_returns_metadata_headers() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("meta-get").await.unwrap();
+
+        let mut metadata = HashMap::new();
+        metadata.insert("Color".into(), "Red".into());
+        metadata.insert("Project".into(), "Cirrus".into());
+
+        let body = Bytes::from("metadata test");
+        handle_put_object(&storage, "meta-get", "meta-file.txt", "text/plain", metadata, body)
+            .await
+            .expect("put_object");
+
+        let resp = handle_get_object(&storage, "meta-get", "meta-file.txt")
+            .await
+            .expect("get_object should succeed");
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers()
+                .get("x-amz-meta-Color")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Red"
+        );
+        assert_eq!(
+            resp.headers()
+                .get("x-amz-meta-Project")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Cirrus"
+        );
+    }
+
     // -- handle_head_object tests ----------------------------------------
 
     #[tokio::test]
@@ -650,7 +703,7 @@ mod tests {
         storage.create_bucket("head-test").await.unwrap();
 
         let body = Bytes::from("head body content");
-        handle_put_object(&storage, "head-test", "head-file.txt", "text/plain", body.clone())
+        handle_put_object(&storage, "head-test", "head-file.txt", "text/plain", HashMap::new(), body.clone())
             .await
             .expect("put_object");
 
@@ -696,6 +749,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_head_object_returns_metadata_headers() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("meta-head").await.unwrap();
+
+        let mut metadata = HashMap::new();
+        metadata.insert("Content-Type".into(), "image/png".into());
+        metadata.insert("Author".into(), "test-user".into());
+
+        let body = Bytes::from("head metadata");
+        handle_put_object(&storage, "meta-head", "head-meta.txt", "text/plain", metadata, body)
+            .await
+            .expect("put_object");
+
+        let resp = handle_head_object(&storage, "meta-head", "head-meta.txt")
+            .await
+            .expect("head_object should succeed");
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers()
+                .get("x-amz-meta-Content-Type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "image/png"
+        );
+        assert_eq!(
+            resp.headers()
+                .get("x-amz-meta-Author")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "test-user"
+        );
+    }
+
+    #[tokio::test]
     async fn test_head_object_returns_404_no_such_key() {
         let storage = DefaultStorage::new();
         storage.create_bucket("head-test-2").await.unwrap();
@@ -706,6 +796,33 @@ mod tests {
         assert_eq!(err.error_code(), "NoSuchKey");
     }
 
+    #[tokio::test]
+    async fn test_get_object_with_empty_metadata_has_no_meta_headers() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("empty-meta").await.unwrap();
+
+        let body = Bytes::from("no metadata");
+        handle_put_object(&storage, "empty-meta", "plain.txt", "text/plain", HashMap::new(), body)
+            .await
+            .expect("put_object");
+
+        let resp = handle_get_object(&storage, "empty-meta", "plain.txt")
+            .await
+            .expect("get_object should succeed");
+
+        // Verify no x-amz-meta-* headers are present.
+        let meta_headers: Vec<_> = resp
+            .headers()
+            .iter()
+            .filter(|(name, _)| name.as_str().starts_with("x-amz-meta-"))
+            .collect();
+        assert!(
+            meta_headers.is_empty(),
+            "expected no x-amz-meta-* headers, got: {:?}",
+            meta_headers
+        );
+    }
+
     // -- handle_delete_object tests --------------------------------------
 
     #[tokio::test]
@@ -714,7 +831,7 @@ mod tests {
         storage.create_bucket("del-obj").await.unwrap();
 
         let body = Bytes::from("delete me");
-        handle_put_object(&storage, "del-obj", "target.txt", "text/plain", body)
+        handle_put_object(&storage, "del-obj", "target.txt", "text/plain", HashMap::new(), body)
             .await
             .expect("put_object");
 
@@ -749,7 +866,7 @@ mod tests {
         storage.create_bucket("del-obj-twice").await.unwrap();
 
         let body = Bytes::from("data");
-        handle_put_object(&storage, "del-obj-twice", "k", "text/plain", body)
+        handle_put_object(&storage, "del-obj-twice", "k", "text/plain", HashMap::new(), body)
             .await
             .expect("put_object");
 
@@ -783,7 +900,7 @@ mod tests {
         storage.create_bucket("copy-dst").await.unwrap();
 
         let body = Bytes::from("copy this content");
-        handle_put_object(&storage, "copy-src", "source.txt", "text/plain", body.clone())
+        handle_put_object(&storage, "copy-src", "source.txt", "text/plain", HashMap::new(), body.clone())
             .await
             .expect("put_object");
 
@@ -865,7 +982,7 @@ mod tests {
         storage.create_bucket("b").await.unwrap();
 
         let body = Bytes::from("same bucket copy");
-        handle_put_object(&storage, "b", "original.txt", "text/plain", body.clone())
+        handle_put_object(&storage, "b", "original.txt", "text/plain", HashMap::new(), body.clone())
             .await
             .expect("put_object");
 

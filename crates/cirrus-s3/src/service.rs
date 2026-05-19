@@ -202,7 +202,21 @@ async fn dispatch<S: Storage>(
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .unwrap_or(S3Object::DEFAULT_CONTENT_TYPE);
-        return handlers::handle_put_object(storage, bucket, key, content_type, body).await;
+
+        // Extract x-amz-meta-* headers into a metadata map.
+        let metadata: HashMap<String, String> = headers
+            .iter()
+            .filter_map(|(name, value)| {
+                let name_str = name.as_str().to_lowercase();
+                if let Some(key) = name_str.strip_prefix("x-amz-meta-") {
+                    value.to_str().ok().map(|v| (key.to_string(), v.to_string()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        return handlers::handle_put_object(storage, bucket, key, content_type, metadata, body).await;
     }
 
     // ---- 15. GET /{bucket}/{key}?uploadId=ID → ListParts ---------------
