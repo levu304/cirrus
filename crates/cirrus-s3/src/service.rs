@@ -410,10 +410,16 @@ fn method_not_allowed(method: &Method) -> AwsError {
 async fn body_to_bytes(body: Body) -> Result<Bytes, AwsError> {
     axum::body::to_bytes(body, MAX_UPLOAD_SIZE)
         .await
-        .map_err(|_e| {
-            AwsError::new(AwsErrorKind::InternalError {
-                details: None,
-            })
+        .map_err(|e| {
+            if e.to_string().contains("length limit exceeded") {
+                AwsError::new(AwsErrorKind::EntityTooLarge {
+                    entity: "request body".into(),
+                })
+            } else {
+                AwsError::new(AwsErrorKind::InternalError {
+                    details: Some(format!("body read failed: {e}")),
+                })
+            }
         })
 }
 
@@ -435,6 +441,14 @@ async fn body_to_bytes(body: Body) -> Result<Bytes, AwsError> {
 pub(crate) fn validate_copy_source(copy_source: &str) -> Result<(&str, &str), AwsError> {
     // Reject URL schemes (SSRF protection)
     if copy_source.contains("://") {
+        return Err(AwsError::new(AwsErrorKind::InvalidArgument {
+            argument_name: "x-amz-copy-source".into(),
+            value: copy_source.into(),
+        }));
+    }
+
+    // Reject protocol-relative URLs (SSRF bypass, e.g. "//internal/secret").
+    if copy_source.starts_with("//") {
         return Err(AwsError::new(AwsErrorKind::InvalidArgument {
             argument_name: "x-amz-copy-source".into(),
             value: copy_source.into(),
@@ -858,6 +872,59 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // body_to_bytes
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_body_to_bytes_success() {
+        let body = Body::from("hello world");
+        let result = body_to_bytes(body).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), &b"hello world"[..]);
+    }
+
+    #[tokio::test]
+    async fn test_body_to_bytes_body_read_error_preserves_details() {
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+        use http_body::{Body as HttpBody, Frame};
+
+        /// A body that fails immediately on read — used to verify that
+        /// `body_to_bytes` preserves the original error context instead of
+        /// swallowing it.
+        struct FailingBody;
+
+        impl HttpBody for FailingBody {
+            type Data = Bytes;
+            type Error = Box<dyn std::error::Error + Send + Sync>;
+
+            fn poll_frame(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+                Poll::Ready(Some(Err("body read failure: connection reset".into())))
+            }
+
+            fn is_end_stream(&self) -> bool {
+                // We have no data to send, so immediately report end-of-stream
+                // after the error.
+                true
+            }
+        }
+
+        let body = Body::new(FailingBody);
+        let result = body_to_bytes(body).await;
+        let err = result.expect_err("expected error from failing body");
+        assert_eq!(err.error_code(), "InternalError");
+        assert_eq!(err.status_code(), 500);
+        assert!(
+            err.message().contains("body read failure: connection reset"),
+            "error message should preserve original error details, got: {}",
+            err.message()
+        );
+    }
+
+    // ------------------------------------------------------------------
     // validate_copy_source
     // ------------------------------------------------------------------
 
@@ -877,6 +944,13 @@ mod tests {
     #[test]
     fn test_validate_copy_source_ssrf_https_url() {
         let result = validate_copy_source("https://internal.service/secret");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().status_code(), 400);
+    }
+
+    #[test]
+    fn test_validate_copy_source_ssrf_protocol_relative() {
+        let result = validate_copy_source("//169.254.169.254/latest/meta-data/");
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().status_code(), 400);
     }

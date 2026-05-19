@@ -243,7 +243,6 @@ pub async fn handle_put_object<S: Storage>(
     Response::builder()
         .status(200)
         .header("ETag", &etag)
-        .header("x-amz-server-side-encryption", "AES256")
         .header("x-amz-request-id", &request_id)
         .header("x-amz-id-2", "cirrus-v0.1.0")
         .body(Body::empty())
@@ -565,14 +564,6 @@ mod tests {
         assert_eq!(
             resp.headers().get("ETag").unwrap().to_str().unwrap(),
             expected_etag
-        );
-        assert_eq!(
-            resp.headers()
-                .get("x-amz-server-side-encryption")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "AES256"
         );
         assert!(resp.headers().get("x-amz-request-id").is_some());
         assert_eq!(

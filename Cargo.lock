@@ -297,6 +297,7 @@ dependencies = [
  "cirrus-router",
  "dashmap",
  "http",
+ "http-body",
  "md-5",
  "proptest",
  "quick-xml",
