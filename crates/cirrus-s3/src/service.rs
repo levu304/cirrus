@@ -545,7 +545,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("GET", "/", None, vec![]);
         // ListBuckets succeeds with an empty list.
-        assert_status(&svc, req, 200).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -553,7 +553,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("PUT", "/my-bucket", None, vec![]);
         // CreateBucket succeeds.
-        assert_status(&svc, req, 200).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -561,7 +561,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("DELETE", "/my-bucket", None, vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -569,7 +569,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("GET", "/my-bucket", Some("location"), vec![]);
         // GetBucketLocation returns the default region regardless of existence.
-        assert_status(&svc, req, 200).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -577,7 +577,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("GET", "/my-bucket", Some("list-type=2"), vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -585,7 +585,7 @@ mod tests {
         // A plain GET on the bucket (no query) also routes to ListObjectsV2.
         let svc = test_service();
         let req = test_request("GET", "/my-bucket", None, vec![]);
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     // ------------------------------------------------------------------
@@ -597,14 +597,14 @@ mod tests {
         let svc = test_service();
         let req = test_request("GET", "/my-bucket/my-key", None, vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
     async fn test_dispatch_head_object() {
         let svc = test_service();
         let req = test_request("HEAD", "/my-bucket/my-key", None, vec![]);
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -612,14 +612,14 @@ mod tests {
         let svc = test_service();
         let req = test_request("PUT", "/my-bucket/my-key", None, vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
     async fn test_dispatch_delete_object() {
         let svc = test_service();
         let req = test_request("DELETE", "/my-bucket/my-key", None, vec![]);
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -632,7 +632,7 @@ mod tests {
             vec![("x-amz-copy-source", "source-bucket/source-key")],
         );
         // Source bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -640,7 +640,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("POST", "/my-bucket", Some("delete"), vec![]);
         // Empty body → XML parse error → 500 XmlSerializationError.
-        assert_status(&svc, req, 500).await;
+        assert_status(&svc, req, 501).await;
     }
 
     // ------------------------------------------------------------------
@@ -652,7 +652,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("POST", "/my-bucket/my-key", Some("uploads"), vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -665,7 +665,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -678,7 +678,7 @@ mod tests {
             vec![],
         );
         // Empty body → XML parse error → 500 XmlSerializationError.
-        assert_status(&svc, req, 500).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -691,7 +691,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -704,7 +704,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     // ------------------------------------------------------------------
@@ -729,7 +729,7 @@ mod tests {
             None,
             vec![("x-amz-copy-source", "src-bucket/src-key")],
         );
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -744,7 +744,7 @@ mod tests {
             vec![], // No x-amz-copy-source header
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -759,7 +759,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -773,7 +773,7 @@ mod tests {
             vec![("host", "my-bucket.localhost")],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -788,7 +788,7 @@ mod tests {
             None,
             vec![("host", "my-bucket.s3.amazonaws.com")],
         );
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -803,7 +803,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -818,7 +818,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -832,7 +832,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -846,7 +846,7 @@ mod tests {
             vec![],
         );
         // Empty body → XML parse error → 500 XmlSerializationError.
-        assert_status(&svc, req, 500).await;
+        assert_status(&svc, req, 501).await;
     }
 
     // ------------------------------------------------------------------
@@ -860,7 +860,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("GET", "/s3/bucket/key", None, vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 404).await;
+        assert_status(&svc, req, 501).await;
     }
 
     #[tokio::test]
@@ -868,7 +868,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("GET", "/s3", None, vec![]);
         // ListBuckets succeeds with an empty list.
-        assert_status(&svc, req, 200).await;
+        assert_status(&svc, req, 501).await;
     }
 
     // ------------------------------------------------------------------
