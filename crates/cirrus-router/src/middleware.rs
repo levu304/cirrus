@@ -35,8 +35,9 @@ use crate::MAX_REQUEST_BYTES;
 /// # How it works
 ///
 /// 1. Reads the `Content-Length` header from the request (if present).
-/// 2. Collects the entire request body into memory (bounded by the 100 MB
-///    limit enforced by [`RequestBodyLimitLayer`](tower_http::limit::RequestBodyLimitLayer)).
+/// 2. Collects the entire request body into memory (bounded by the
+///    Content-Length / max-size pre-check at step 2a below, which rejects
+///    oversized payloads before the body is collected).
 /// 3. Reconstructs the request with the collected body so the handler receives
 ///    the full body stream.
 /// 4. After the handler completes, compares actual bytes read against the
@@ -46,8 +47,11 @@ use crate::MAX_REQUEST_BYTES;
 ///
 /// # Middleware ordering
 ///
-/// This middleware should sit **inside** the `RequestBodyLimitLayer` so that
-/// oversized bodies are rejected before this middleware attempts to collect them.
+/// This middleware should sit **outside** the `RequestBodyLimitLayer` so it
+/// can check the declared `Content-Length` against the maximum allowed size
+/// before collecting the body. The pre-check at the top of this function
+/// (comparing `Content-Length` to `MAX_REQUEST_BYTES`) provides the DoS
+/// protection that would otherwise come from the limit layer wrapping the body.
 pub async fn incomplete_body_detection(
     request: Request,
     next: Next,
