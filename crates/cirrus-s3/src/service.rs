@@ -77,7 +77,11 @@ impl<S: Storage> AwsService for S3Service<S> {
         let s3_path = strip_service_prefix(&path, "s3");
 
         // --- 3. Read request body ----------------------------------------
-        let body_bytes = body_to_bytes(body).await?;
+        let body_bytes = if method == Method::PUT || method == Method::POST {
+            body_to_bytes(body).await?
+        } else {
+            Bytes::new()
+        };
 
         // --- 4. Resolve bucket + key -------------------------------------
         let (bucket, key) = resolve_bucket_or_key(&s3_path, host)?;
@@ -526,6 +530,193 @@ mod tests {
         }
     }
 
+    /// Test-only dispatch verifier that mirrors `dispatch()` but returns the
+    /// handler name instead of calling it.  This lets dispatch tests verify
+    /// *which* handler was selected, not just the status code.
+    fn dispatch_rule_expected(
+        method: &Method,
+        bucket: &str,
+        key: &str,
+        query_params: &HashMap<String, String>,
+        headers: &HeaderMap,
+    ) -> Result<&'static str, AwsError> {
+        let no_bucket = bucket.is_empty();
+        let no_key = key.is_empty();
+
+        // ---- 1. GET / (no bucket) → ListBuckets ----------------------------
+        if *method == Method::GET && no_bucket {
+            return Ok("handle_list_buckets");
+        }
+
+        // ---- 2. PUT /{bucket} (key empty) → CreateBucket -------------------
+        if *method == Method::PUT && no_key {
+            return Ok("handle_create_bucket");
+        }
+
+        // ---- 3. DELETE /{bucket} (key empty) → DeleteBucket ----------------
+        if *method == Method::DELETE && no_key {
+            return Ok("handle_delete_bucket");
+        }
+
+        // All remaining rules require at least a bucket.
+        if no_bucket {
+            return Err(method_not_allowed(method));
+        }
+
+        // ---- 16. GET /{bucket}?location → GetBucketLocation ----------------
+        // ---- 4.  GET /{bucket} → ListObjectsV2 ------------------------------
+        if *method == Method::GET && no_key {
+            if query_params.contains_key("location") {
+                return Ok("handle_get_bucket_location");
+            }
+            return Ok("handle_list_objects_v2");
+        }
+
+        // ---- 10. POST /{bucket}?delete → DeleteObjects ---------------------
+        if *method == Method::POST && no_key && query_params.contains_key("delete") {
+            return Ok("handle_delete_objects");
+        }
+
+        // ---- All remaining rules require a key ------------------------------
+        if no_key {
+            return Err(method_not_allowed(method));
+        }
+
+        // ---- 5. PUT /{bucket}/{key} + x-amz-copy-source → CopyObject ------
+        if *method == Method::PUT {
+            if let Some(copy_source) = headers
+                .get("x-amz-copy-source")
+                .and_then(|v| v.to_str().ok())
+            {
+                validate_copy_source(copy_source)?;
+                return Ok("handle_copy_object");
+            }
+        }
+
+        // ---- 12. PUT /{bucket}/{key}?partNumber=N&uploadId=ID → UploadPart -
+        if *method == Method::PUT {
+            if let (Some(pn_str), Some(_upload_id)) =
+                (query_params.get("partNumber"), query_params.get("uploadId"))
+            {
+                if pn_str.parse::<u32>().is_ok() {
+                    return Ok("handle_upload_part");
+                }
+            }
+        }
+
+        // ---- 6. PUT /{bucket}/{key} (fallback) → PutObject -----------------
+        if *method == Method::PUT {
+            return Ok("handle_put_object");
+        }
+
+        // ---- 15. GET /{bucket}/{key}?uploadId=ID → ListParts ---------------
+        if *method == Method::GET && query_params.contains_key("uploadId") {
+            return Ok("handle_list_parts");
+        }
+
+        // ---- 7. GET /{bucket}/{key} (no uploadId) → GetObject --------------
+        if *method == Method::GET {
+            return Ok("handle_get_object");
+        }
+
+        // ---- 8. HEAD /{bucket}/{key} → HeadObject --------------------------
+        if *method == Method::HEAD {
+            return Ok("handle_head_object");
+        }
+
+        // ---- 14. DELETE /{bucket}/{key}?uploadId=ID → AbortMultipartUpload -
+        if *method == Method::DELETE && query_params.contains_key("uploadId") {
+            return Ok("handle_abort_multipart_upload");
+        }
+
+        // ---- 9. DELETE /{bucket}/{key} (no uploadId) → DeleteObject --------
+        if *method == Method::DELETE {
+            return Ok("handle_delete_object");
+        }
+
+        // ---- 11. POST /{bucket}/{key}?uploads → CreateMultipartUpload ------
+        if *method == Method::POST && query_params.contains_key("uploads") {
+            return Ok("handle_create_multipart_upload");
+        }
+
+        // ---- 13. POST /{bucket}/{key}?uploadId=ID → CompleteMultipartUpload
+        if *method == Method::POST && query_params.contains_key("uploadId") {
+            return Ok("handle_complete_multipart_upload");
+        }
+
+        // ---- Default: MethodNotAllowed --------------------------------------
+        Err(method_not_allowed(method))
+    }
+
+    /// Assert that handling a request dispatches to the expected handler and
+    /// returns the expected HTTP status code.
+    async fn assert_handler_called(
+        svc: &S3Service<DefaultStorage>,
+        req: Request<Body>,
+        expected_handler: &str,
+        expected_status: u16,
+    ) {
+        let method = req.method().clone();
+        let path = req.uri().path().to_string();
+        let query = req.uri().query().unwrap_or("").to_string();
+        let headers = req.headers().clone();
+        let host = headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("localhost")
+            .to_string();
+
+        // Resolve params like handle() does.
+        let s3_path = strip_service_prefix(&path, "s3");
+        let (bucket, key) =
+            resolve_bucket_or_key(&s3_path, &host).expect("resolve_bucket_or_key failed for test request");
+        let query_params = parse_query(&query);
+
+        // Verify handler name.
+        let result = dispatch_rule_expected(&method, &bucket, &key, &query_params, &headers);
+        match &result {
+            Ok(name) => assert_eq!(
+                *name,
+                expected_handler,
+                "handler mismatch for {} {}?{}",
+                method,
+                path,
+                query
+            ),
+            Err(e) => {
+                panic!(
+                    "expected handler '{}' but got error '{}' for {} {}?{}",
+                    expected_handler,
+                    e.error_code(),
+                    method,
+                    path,
+                    query
+                )
+            }
+        }
+
+        // Verify status code from the actual response.
+        let resp = svc.handle(req).await;
+        match resp {
+            Ok(r) => assert_eq!(
+                r.status(),
+                expected_status,
+                "status mismatch for {} {}?{}",
+                method,
+                path,
+                query
+            ),
+            Err(e) => assert_eq!(
+                e.status_code(),
+                expected_status,
+                "status mismatch for {} {}?{}",
+                method,
+                path,
+                query
+            ),
+        }
+    }
+
     // ------------------------------------------------------------------
     // strip_service_prefix
     // ------------------------------------------------------------------
@@ -612,6 +803,48 @@ mod tests {
         assert_eq!(err.status_code(), 500);
     }
 
+    #[test]
+    fn test_s3_error_to_aws_no_such_upload() {
+        let err = s3_error_to_aws(S3Error::NoSuchUpload, "b", "k");
+        assert_eq!(err.error_code(), "NoSuchUpload");
+        assert_eq!(err.status_code(), 404);
+    }
+
+    #[test]
+    fn test_s3_error_to_aws_bucket_already_exists() {
+        let err = s3_error_to_aws(S3Error::BucketAlreadyExists, "my-bucket", "");
+        assert_eq!(err.error_code(), "BucketAlreadyExists");
+        assert_eq!(err.status_code(), 409);
+    }
+
+    #[test]
+    fn test_s3_error_to_aws_bucket_not_empty() {
+        let err = s3_error_to_aws(S3Error::BucketNotEmpty, "my-bucket", "");
+        assert_eq!(err.error_code(), "BucketNotEmpty");
+        assert_eq!(err.status_code(), 409);
+    }
+
+    #[test]
+    fn test_s3_error_to_aws_invalid_part_order() {
+        let err = s3_error_to_aws(S3Error::InvalidPartOrder, "b", "k");
+        assert_eq!(err.error_code(), "InternalError");
+        assert_eq!(err.status_code(), 500);
+    }
+
+    #[test]
+    fn test_s3_error_to_aws_entity_too_large() {
+        let err = s3_error_to_aws(S3Error::EntityTooLarge, "b", "k");
+        assert_eq!(err.error_code(), "EntityTooLarge");
+        assert_eq!(err.status_code(), 400);
+    }
+
+    #[test]
+    fn test_s3_error_to_aws_max_capacity_exceeded() {
+        let err = s3_error_to_aws(S3Error::MaxCapacityExceeded, "b", "k");
+        assert_eq!(err.error_code(), "InternalError");
+        assert_eq!(err.status_code(), 500);
+    }
+
     // ------------------------------------------------------------------
     // validate_copy_source
     // ------------------------------------------------------------------
@@ -671,7 +904,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("GET", "/", None, vec![]);
         // ListBuckets succeeds with an empty list.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_list_buckets", 501).await;
     }
 
     #[tokio::test]
@@ -679,7 +912,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("PUT", "/my-bucket", None, vec![]);
         // CreateBucket succeeds.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_create_bucket", 501).await;
     }
 
     #[tokio::test]
@@ -687,7 +920,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("DELETE", "/my-bucket", None, vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_delete_bucket", 501).await;
     }
 
     #[tokio::test]
@@ -695,7 +928,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("GET", "/my-bucket", Some("location"), vec![]);
         // GetBucketLocation returns the default region regardless of existence.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_get_bucket_location", 501).await;
     }
 
     #[tokio::test]
@@ -703,7 +936,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("GET", "/my-bucket", Some("list-type=2"), vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_list_objects_v2", 501).await;
     }
 
     #[tokio::test]
@@ -711,7 +944,7 @@ mod tests {
         // A plain GET on the bucket (no query) also routes to ListObjectsV2.
         let svc = test_service();
         let req = test_request("GET", "/my-bucket", None, vec![]);
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_list_objects_v2", 501).await;
     }
 
     // ------------------------------------------------------------------
@@ -723,14 +956,14 @@ mod tests {
         let svc = test_service();
         let req = test_request("GET", "/my-bucket/my-key", None, vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_get_object", 501).await;
     }
 
     #[tokio::test]
     async fn test_dispatch_head_object() {
         let svc = test_service();
         let req = test_request("HEAD", "/my-bucket/my-key", None, vec![]);
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_head_object", 501).await;
     }
 
     #[tokio::test]
@@ -738,14 +971,14 @@ mod tests {
         let svc = test_service();
         let req = test_request("PUT", "/my-bucket/my-key", None, vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_put_object", 501).await;
     }
 
     #[tokio::test]
     async fn test_dispatch_delete_object() {
         let svc = test_service();
         let req = test_request("DELETE", "/my-bucket/my-key", None, vec![]);
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_delete_object", 501).await;
     }
 
     #[tokio::test]
@@ -758,7 +991,7 @@ mod tests {
             vec![("x-amz-copy-source", "/source-bucket/source-key")],
         );
         // Source bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_copy_object", 501).await;
     }
 
     #[tokio::test]
@@ -806,7 +1039,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("POST", "/my-bucket", Some("delete"), vec![]);
         // Empty body → XML parse error → 500 XmlSerializationError.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_delete_objects", 501).await;
     }
 
     // ------------------------------------------------------------------
@@ -818,7 +1051,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("POST", "/my-bucket/my-key", Some("uploads"), vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_create_multipart_upload", 501).await;
     }
 
     #[tokio::test]
@@ -831,7 +1064,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_upload_part", 501).await;
     }
 
     #[tokio::test]
@@ -844,7 +1077,7 @@ mod tests {
             vec![],
         );
         // Empty body → XML parse error → 500 XmlSerializationError.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_complete_multipart_upload", 501).await;
     }
 
     #[tokio::test]
@@ -857,7 +1090,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_abort_multipart_upload", 501).await;
     }
 
     #[tokio::test]
@@ -870,7 +1103,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_list_parts", 501).await;
     }
 
     // ------------------------------------------------------------------
@@ -878,10 +1111,18 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_dispatch_method_not_allowed() {
+    async fn test_dispatch_method_not_allowed_patch() {
         let svc = test_service();
         // PATCH is not an S3 method — should get 405.
         let req = test_request("PATCH", "/my-bucket/my-key", None, vec![]);
+        assert_status(&svc, req, 405).await;
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_options_not_allowed() {
+        let svc = test_service();
+        // OPTIONS is not an S3 method — should get 405.
+        let req = test_request("OPTIONS", "/my-bucket/my-key", None, vec![]);
         assert_status(&svc, req, 405).await;
     }
 
@@ -895,7 +1136,7 @@ mod tests {
             None,
             vec![("x-amz-copy-source", "/src-bucket/src-key")],
         );
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_copy_object", 501).await;
     }
 
     #[tokio::test]
@@ -910,7 +1151,7 @@ mod tests {
             vec![], // No x-amz-copy-source header
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_upload_part", 501).await;
     }
 
     #[tokio::test]
@@ -925,12 +1166,29 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_put_object", 501).await;
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_put_with_invalid_partnumber_falls_to_put() {
+        // PUT with invalid (non-numeric) partNumber and valid uploadId should
+        // fall through to regular PutObject (rule 6) because the u32 parse
+        // failure prevents UploadPart (rule 12) from matching.
+        let svc = test_service();
+        let req = test_request(
+            "PUT",
+            "/bucket/key",
+            Some("partNumber=abc&uploadId=uid"),
+            vec![],
+        );
+        assert_handler_called(&svc, req, "handle_put_object", 501).await;
     }
 
     #[tokio::test]
     async fn test_dispatch_virtual_hosted_addressing() {
         // Virtual-hosted: Host = my-bucket.localhost, path = /key
+        // NOTE: "my-bucket.localhost" has only 2 labels, so classify_host_style
+        // treats it as path-style → "/my-key" is the bucket, not the key.
         let svc = test_service();
         let req = test_request(
             "GET",
@@ -939,7 +1197,9 @@ mod tests {
             vec![("host", "my-bucket.localhost")],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 501).await;
+        // Routes to bucket-level GET (ListObjectsV2) because the first path
+        // segment is treated as the bucket in path-style addressing.
+        assert_handler_called(&svc, req, "handle_list_objects_v2", 501).await;
     }
 
     #[tokio::test]
@@ -954,7 +1214,7 @@ mod tests {
             None,
             vec![("host", "my-bucket.s3.amazonaws.com")],
         );
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_list_objects_v2", 501).await;
     }
 
     #[tokio::test]
@@ -969,7 +1229,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_list_parts", 501).await;
     }
 
     #[tokio::test]
@@ -984,7 +1244,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_abort_multipart_upload", 501).await;
     }
 
     #[tokio::test]
@@ -998,7 +1258,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_create_multipart_upload", 501).await;
     }
 
     #[tokio::test]
@@ -1012,7 +1272,22 @@ mod tests {
             vec![],
         );
         // Empty body → XML parse error → 500 XmlSerializationError.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_complete_multipart_upload", 501).await;
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_post_with_both_uploads_and_upload_id() {
+        // POST /bucket/key?uploads&uploadId=X — rule 11 (?uploads) must be
+        // checked BEFORE rule 13 (?uploadId), so this dispatches to
+        // CreateMultipartUpload, NOT CompleteMultipartUpload.
+        let svc = test_service();
+        let req = test_request(
+            "POST",
+            "/bucket/key",
+            Some("uploads&uploadId=test-upload-id"),
+            vec![],
+        );
+        assert_handler_called(&svc, req, "handle_create_multipart_upload", 501).await;
     }
 
     // ------------------------------------------------------------------
@@ -1026,7 +1301,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("GET", "/s3/bucket/key", None, vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_get_object", 501).await;
     }
 
     #[tokio::test]
@@ -1034,7 +1309,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("GET", "/s3", None, vec![]);
         // ListBuckets succeeds with an empty list.
-        assert_status(&svc, req, 501).await;
+        assert_handler_called(&svc, req, "handle_list_buckets", 501).await;
     }
 
     // ------------------------------------------------------------------
