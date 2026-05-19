@@ -216,7 +216,7 @@ pub trait Storage: Send + Sync + Clone + 'static {
         src_key: &str,
         dst_bucket: &str,
         dst_key: &str,
-    ) -> Result<(), S3Error>;
+    ) -> Result<S3Object, S3Error>;
 
     /// List objects in a bucket (ListObjectsV2) with prefix, delimiter,
     /// and continuation-token pagination.
@@ -470,7 +470,7 @@ impl Storage for DefaultStorage {
         src_key: &str,
         dst_bucket: &str,
         dst_key: &str,
-    ) -> Result<(), S3Error> {
+    ) -> Result<S3Object, S3Error> {
         // Scope the source-bucket borrow so we drop the Ref before
         // acquiring the destination-bucket Ref (they may be the same bucket).
         let new_obj = {
@@ -495,8 +495,8 @@ impl Storage for DefaultStorage {
         // AP-P6: Bytes::clone() is O(1) — do NOT increment total_bytes.
         dst_bkt
             .objects
-            .insert(dst_key.to_string(), new_obj);
-        Ok(())
+            .insert(dst_key.to_string(), new_obj.clone());
+        Ok(new_obj)
     }
 
     async fn list_objects_v2(

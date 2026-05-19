@@ -156,20 +156,14 @@ pub async fn handle_copy_object<S: Storage>(
 ) -> Result<Response<Body>, AwsError> {
     let (src_bucket, src_key) = validate_copy_source(copy_source)?;
 
-    storage
+    let obj = storage
         .copy_object(src_bucket, src_key, dst_bucket, dst_key)
         .await
         .map_err(|e| s3_error_to_aws(e, src_bucket, src_key))?;
 
-    // Retrieve the copied object's metadata to populate CopyObjectResult.
-    let head_result = storage
-        .head_object(dst_bucket, dst_key)
-        .await
-        .map_err(|e| s3_error_to_aws(e, dst_bucket, dst_key))?;
-
     let result = CopyObjectResult {
-        etag: head_result.object.etag,
-        last_modified: head_result.object.last_modified,
+        etag: obj.etag,
+        last_modified: obj.last_modified,
     };
 
     let xml = serialize(&result, "CopyObjectResult")?;
