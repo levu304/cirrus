@@ -168,6 +168,7 @@ async fn dispatch<S: Storage>(
             .get("x-amz-copy-source")
             .and_then(|v| v.to_str().ok())
         {
+            validate_copy_source(copy_source)?;
             return handlers::handle_copy_object(storage, bucket, key, copy_source).await;
         }
     }
@@ -401,6 +402,52 @@ async fn body_to_bytes(body: Body) -> Result<Bytes, AwsError> {
 }
 
 // ---------------------------------------------------------------------------
+// Copy-source validation (SSRF defense)
+// ---------------------------------------------------------------------------
+
+/// Validate the `x-amz-copy-source` header to prevent SSRF attacks.
+///
+/// The header value must be a valid S3 copy-source path in the format
+/// `/bucket/key` or `bucket/key`. Returns the validated source path
+/// split into `(bucket, key)`, or an [`AwsError`] on validation failure.
+///
+/// # Errors
+///
+/// Returns `InvalidArgument` (HTTP 400) when the value contains a URL
+/// scheme (`://`), lacks a `/` separator between bucket and key, or has
+/// an empty bucket name.
+fn validate_copy_source(copy_source: &str) -> Result<(&str, &str), AwsError> {
+    // Reject URL schemes (SSRF protection)
+    if copy_source.contains("://") {
+        return Err(AwsError::new(AwsErrorKind::InvalidArgument {
+            argument_name: "x-amz-copy-source".into(),
+            value: copy_source.into(),
+        }));
+    }
+
+    // Strip optional leading slash (S3 convention).
+    let source = copy_source.strip_prefix('/').unwrap_or(copy_source);
+
+    // Split into bucket / key.
+    let (src_bucket, src_key) = source.split_once('/').ok_or_else(|| {
+        AwsError::new(AwsErrorKind::InvalidArgument {
+            argument_name: "x-amz-copy-source".into(),
+            value: copy_source.into(),
+        })
+    })?;
+
+    // Reject empty bucket name.
+    if src_bucket.is_empty() {
+        return Err(AwsError::new(AwsErrorKind::InvalidArgument {
+            argument_name: "x-amz-copy-source".into(),
+            value: copy_source.into(),
+        }));
+    }
+
+    Ok((src_bucket, src_key))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -566,6 +613,56 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // validate_copy_source
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_copy_source_valid() {
+        let result = validate_copy_source("/source-bucket/source-key");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_copy_source_ssrf_http_url() {
+        let result = validate_copy_source("http://169.254.169.254/latest/meta-data/");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().status_code(), 400);
+    }
+
+    #[test]
+    fn test_validate_copy_source_ssrf_https_url() {
+        let result = validate_copy_source("https://internal.service/secret");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().status_code(), 400);
+    }
+
+    #[test]
+    fn test_validate_copy_source_missing_path() {
+        let result = validate_copy_source("just-bucket");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().status_code(), 400);
+    }
+
+    #[test]
+    fn test_validate_copy_source_empty() {
+        let result = validate_copy_source("");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().status_code(), 400);
+    }
+
+    #[test]
+    fn test_validate_copy_source_no_bucket() {
+        let result = validate_copy_source("/");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_copy_source_valid_no_leading_slash() {
+        let result = validate_copy_source("bucket/key");
+        assert!(result.is_ok());
+    }
+
+    // ------------------------------------------------------------------
     // Dispatch: bucket-level operations
     // ------------------------------------------------------------------
 
@@ -658,10 +755,50 @@ mod tests {
             "PUT",
             "/my-bucket/my-key",
             None,
-            vec![("x-amz-copy-source", "source-bucket/source-key")],
+            vec![("x-amz-copy-source", "/source-bucket/source-key")],
         );
         // Source bucket does not exist → 404 NoSuchBucket.
         assert_status(&svc, req, 501).await;
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_copy_object_invalid_ssrf() {
+        // SSRF attempt via copy-source should be rejected with 400.
+        let svc = test_service();
+        let req = test_request(
+            "PUT",
+            "/my-bucket/my-key",
+            None,
+            vec![("x-amz-copy-source", "http://169.254.169.254/latest/meta-data/")],
+        );
+        assert_status(&svc, req, 400).await;
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_copy_object_invalid_no_slash() {
+        // Copy-source value that is just a bucket name (no `/`) should be
+        // rejected with 400, not forwarded to the handler.
+        let svc = test_service();
+        let req = test_request(
+            "PUT",
+            "/my-bucket/my-key",
+            None,
+            vec![("x-amz-copy-source", "just-bucket")],
+        );
+        assert_status(&svc, req, 400).await;
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_copy_object_empty() {
+        // Empty copy-source should be rejected.
+        let svc = test_service();
+        let req = test_request(
+            "PUT",
+            "/my-bucket/my-key",
+            None,
+            vec![("x-amz-copy-source", "")],
+        );
+        assert_status(&svc, req, 400).await;
     }
 
     #[tokio::test]
@@ -756,7 +893,7 @@ mod tests {
             "PUT",
             "/bucket/key",
             None,
-            vec![("x-amz-copy-source", "src-bucket/src-key")],
+            vec![("x-amz-copy-source", "/src-bucket/src-key")],
         );
         assert_status(&svc, req, 501).await;
     }
