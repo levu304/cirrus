@@ -306,8 +306,15 @@ fn parse_query(query: &str) -> HashMap<String, String> {
         .filter_map(|pair| {
             let mut parts = pair.splitn(2, '=');
             match (parts.next(), parts.next()) {
-                (Some(k), Some(v)) => Some((k.to_string(), v.to_string())),
-                (Some(k), None) if !k.is_empty() => Some((k.to_string(), String::new())),
+                (Some(k), Some(v)) => {
+                    let decoded_k = urlencoding::decode(k).ok()?.into_owned();
+                    let decoded_v = urlencoding::decode(v).ok()?.into_owned();
+                    Some((decoded_k, decoded_v))
+                }
+                (Some(k), None) if !k.is_empty() => {
+                    let decoded_k = urlencoding::decode(k).ok()?.into_owned();
+                    Some((decoded_k, String::new()))
+                }
                 _ => None,
             }
         })
@@ -519,8 +526,8 @@ mod tests {
     #[test]
     fn test_parse_query_url_encoded_values() {
         let map = parse_query("prefix=hello%20world&delimiter=%2F");
-        assert_eq!(map.get("prefix").unwrap(), "hello%20world");
-        assert_eq!(map.get("delimiter").unwrap(), "%2F");
+        assert_eq!(map.get("prefix").unwrap(), "hello world");
+        assert_eq!(map.get("delimiter").unwrap(), "/");
     }
 
     // ------------------------------------------------------------------
