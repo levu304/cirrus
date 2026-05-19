@@ -338,10 +338,8 @@ fn parse_query(query: &str) -> HashMap<String, String> {
 
 /// Convert an [`S3Error`] into an [`AwsError`] with appropriate error kind.
 ///
-/// This helper is used by handlers in Phases 5b–5e; the warning is suppressed
-/// because it is not yet called from the stub handlers.
-#[allow(dead_code)]
-fn s3_error_to_aws(err: S3Error, bucket: &str, key: &str) -> AwsError {
+/// This helper is used by handlers in Phases 5b–5e.
+pub(crate) fn s3_error_to_aws(err: S3Error, bucket: &str, key: &str) -> AwsError {
     match err {
         S3Error::NoSuchBucket => AwsErrorKind::NoSuchBucket {
             bucket_name: bucket.to_string(),
@@ -904,7 +902,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("GET", "/", None, vec![]);
         // ListBuckets succeeds with an empty list.
-        assert_handler_called(&svc, req, "handle_list_buckets", 501).await;
+        assert_handler_called(&svc, req, "handle_list_buckets", 200).await;
     }
 
     #[tokio::test]
@@ -912,7 +910,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("PUT", "/my-bucket", None, vec![]);
         // CreateBucket succeeds.
-        assert_handler_called(&svc, req, "handle_create_bucket", 501).await;
+        assert_handler_called(&svc, req, "handle_create_bucket", 200).await;
     }
 
     #[tokio::test]
@@ -920,7 +918,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("DELETE", "/my-bucket", None, vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_delete_bucket", 501).await;
+        assert_handler_called(&svc, req, "handle_delete_bucket", 404).await;
     }
 
     #[tokio::test]
@@ -928,7 +926,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("GET", "/my-bucket", Some("location"), vec![]);
         // GetBucketLocation returns the default region regardless of existence.
-        assert_handler_called(&svc, req, "handle_get_bucket_location", 501).await;
+        assert_handler_called(&svc, req, "handle_get_bucket_location", 200).await;
     }
 
     #[tokio::test]
@@ -1309,7 +1307,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("GET", "/s3", None, vec![]);
         // ListBuckets succeeds with an empty list.
-        assert_handler_called(&svc, req, "handle_list_buckets", 501).await;
+        assert_handler_called(&svc, req, "handle_list_buckets", 200).await;
     }
 
     // ------------------------------------------------------------------
