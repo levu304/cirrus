@@ -289,10 +289,12 @@ name = "cirrus-s3"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "base64",
  "bytes",
  "chrono",
  "cirrus-protocol",
+ "cirrus-router",
  "dashmap",
  "http",
  "md-5",

@@ -171,6 +171,13 @@ pub enum AwsErrorKind {
         /// Optional details about the internal error.
         details: Option<String>,
     },
+    /// An argument value is invalid.
+    InvalidArgument {
+        /// The name of the invalid argument.
+        argument_name: String,
+        /// The invalid value provided.
+        value: String,
+    },
     /// An error occurred during XML serialization.
     XmlSerializationError {
         /// Details about the serialization error.
@@ -202,6 +209,7 @@ impl AwsErrorKind {
             Self::MethodNotAllowed { .. } => "MethodNotAllowed",
             Self::EntityTooLarge { .. } => "EntityTooLarge",
             Self::InvalidStorageClass { .. } => "InvalidStorageClass",
+            Self::InvalidArgument { .. } => "InvalidArgument",
             Self::InternalError { .. } => "InternalError",
             Self::XmlSerializationError { .. } => "XmlSerializationError",
             Self::IncompleteBody => "IncompleteBody",
@@ -229,6 +237,7 @@ impl AwsErrorKind {
             Self::MethodNotAllowed { .. } => 405,
             Self::EntityTooLarge { .. } => 400,
             Self::InvalidStorageClass { .. } => 400,
+            Self::InvalidArgument { .. } => 400,
             Self::InternalError { .. } => 500,
             Self::XmlSerializationError { .. } => 500,
             Self::IncompleteBody => 400,
@@ -291,6 +300,15 @@ impl AwsErrorKind {
             }
             Self::InvalidStorageClass { storage_class } => {
                 format!("The storage class {} is not a valid storage class", storage_class)
+            }
+            Self::InvalidArgument {
+                argument_name,
+                value,
+            } => {
+                format!(
+                    "The specified argument {} with value {} is invalid",
+                    argument_name, value
+                )
             }
             Self::InternalError { details } => {
                 if let Some(details) = details {
@@ -391,6 +409,26 @@ mod tests {
             error.message(),
             "PartNumber must be between 1 and 10000, got 15000"
         );
+    }
+
+    #[test]
+    fn test_error_kind_invalid_argument() {
+        let error = AwsError::from(AwsErrorKind::InvalidArgument {
+            argument_name: "path".to_string(),
+            value: "/bucket/%FF".to_string(),
+        });
+
+        assert_eq!(error.error_code(), "InvalidArgument");
+        assert_eq!(error.status_code(), 400);
+        assert_eq!(
+            error.message(),
+            "The specified argument path with value /bucket/%FF is invalid"
+        );
+        let xml = error.to_xml();
+        assert!(xml.contains("<Code>InvalidArgument</Code>"));
+        assert!(xml.contains(
+            "<Message>The specified argument path with value /bucket/%FF is invalid</Message>"
+        ));
     }
 
     #[test]
