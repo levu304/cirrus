@@ -16,6 +16,7 @@ use http_body_util::BodyExt;
 use tracing;
 
 use crate::service::aws_error_response;
+use crate::MAX_REQUEST_BYTES;
 
 // ---------------------------------------------------------------------------
 // incomplete_body_detection
@@ -62,6 +63,22 @@ pub async fn incomplete_body_detection(
     let Some(expected) = content_length else {
         return Ok(next.run(request).await);
     };
+
+    // Reject immediately if the declared Content-Length exceeds the maximum
+    // allowed body size — before collecting the body into memory. Without this
+    // check, an attacker could send a large Content-Length to OOM the server.
+    if expected > MAX_REQUEST_BYTES as u64 {
+        tracing::warn!(
+            content_length = expected,
+            max_allowed = MAX_REQUEST_BYTES,
+            "Request body exceeds maximum allowed size"
+        );
+        return Ok(aws_error_response(AwsError::new(
+            AwsErrorKind::EntityTooLarge {
+                entity: "request body".to_string(),
+            },
+        )));
+    }
 
     // Collect the entire body to count actual bytes consumed.
     let (parts, body) = request.into_parts();

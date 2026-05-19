@@ -5,6 +5,9 @@ pub mod service;
 // Re-export key public API items for convenience.
 pub use service::{aws_error_response, fallback_handler, AwsService, ServiceRegistry};
 
+/// Maximum allowed request body size: 100 MB (matching AWS S3 behavior).
+pub(crate) const MAX_REQUEST_BYTES: usize = 100 * 1024 * 1024;
+
 /// Build the complete axum Router with middleware stack and service registry.
 ///
 /// Middleware stack order (outermost first):
@@ -34,9 +37,6 @@ pub fn build_router(registry: ServiceRegistry) -> axum::Router<ServiceRegistry> 
     use tower_http::limit::RequestBodyLimitLayer;
 
     use crate::middleware::{entity_too_large_interceptor, incomplete_body_detection};
-
-    // Max request body: 100 MB (matching AWS S3 behavior)
-    const MAX_REQUEST_BYTES: usize = 100 * 1024 * 1024;
 
     // `from_fn` middleware work only with `Body`, while `RequestBodyLimitLayer`
     // transforms the body to `Limited<Body>`. The limit layer must therefore sit
