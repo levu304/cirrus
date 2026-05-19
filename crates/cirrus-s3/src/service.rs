@@ -281,8 +281,12 @@ pub fn strip_service_prefix(path: &str, service: &str) -> String {
 /// Try to resolve (bucket, key) from the request path and Host header.
 ///
 /// Returns `("", "")` when the path is effectively empty (root request),
-/// which is the case for `GET /` (ListBuckets).  All other address
-/// resolution errors are propagated as `AwsError::InternalError`.
+/// which is the case for `GET /` (ListBuckets). Address resolution errors
+/// are mapped to appropriate client- or server-error codes:
+///
+/// * `MissingHost` → 400 Bad Request (missing Host header)
+/// * `MissingBucket` → empty bucket/key (treated as root request)
+/// * `DecodeError` → 400 Bad Request (invalid percent-encoding in path)
 fn resolve_bucket_or_key(path: &str, host: &str) -> Result<(String, String), AwsError> {
     match resolve_address(host, path) {
         Ok(result) => Ok(result),
@@ -290,8 +294,14 @@ fn resolve_bucket_or_key(path: &str, host: &str) -> Result<(String, String), Aws
             // Root path (e.g. GET /) — no bucket, no key.
             Ok((String::new(), String::new()))
         }
-        Err(e) => Err(AwsError::new(AwsErrorKind::InternalError {
-            details: Some(format!("Address resolution error: {}", e)),
+        Err(AddressError::MissingHost) => Err(AwsError::new(
+            AwsErrorKind::MissingRequestHeader {
+                header_name: "Host".to_string(),
+            },
+        )),
+        Err(AddressError::DecodeError(_)) => Err(AwsError::new(AwsErrorKind::InvalidArgument {
+            argument_name: "path".to_string(),
+            value: path.to_string(),
         })),
     }
 }
@@ -913,6 +923,25 @@ mod tests {
         let (bucket, key) = resolve_bucket_or_key("/bucket/key", "localhost:9000").unwrap();
         assert_eq!(bucket, "bucket");
         assert_eq!(key, "key");
+    }
+
+    #[test]
+    fn test_resolve_bucket_or_key_invalid_encoding() {
+        let result = resolve_bucket_or_key("/bucket/%FF", "localhost");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status_code(), 400);
+        // Message should not contain internal details
+        assert!(!err.message().contains("Address resolution error"));
+    }
+
+    #[test]
+    fn test_resolve_bucket_or_key_missing_host() {
+        let result = resolve_bucket_or_key("/bucket/key", "");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status_code(), 400);
+        assert_eq!(err.error_code(), "MissingRequestHeader");
     }
 
     // ------------------------------------------------------------------
