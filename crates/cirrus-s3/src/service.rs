@@ -86,6 +86,12 @@ impl<S: Storage> AwsService for S3Service<S> {
         // --- 4. Resolve bucket + key -------------------------------------
         let (bucket, key) = resolve_bucket_or_key(&s3_path, host)?;
 
+        // --- 4b. Validate no path traversal ------------------------------
+        validate_no_path_traversal(&bucket, "bucket")?;
+        if !key.is_empty() {
+            validate_no_path_traversal(&key, "key")?;
+        }
+
         // --- 5. Parse query parameters -----------------------------------
         let query_params = parse_query(&query);
 
@@ -173,7 +179,40 @@ async fn dispatch<S: Storage>(
             .and_then(|v| v.to_str().ok())
         {
             validate_copy_source(copy_source)?;
-            return handlers::handle_copy_object(storage, bucket, key, copy_source).await;
+
+            // x-amz-metadata-directive: "REPLACE" or "COPY" (default).
+            let directive = headers
+                .get("x-amz-metadata-directive")
+                .and_then(|v| v.to_str().ok());
+            let is_replace = directive
+                .map(|v| v.eq_ignore_ascii_case("REPLACE"))
+                .unwrap_or(false);
+
+            // Extract x-amz-meta-* headers only when REPLACE is requested.
+            let metadata: HashMap<String, String> = if is_replace {
+                headers
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        let name_str = name.as_str().to_lowercase();
+                        if let Some(key) = name_str.strip_prefix("x-amz-meta-") {
+                            value.to_str().ok().map(|v| (key.to_string(), v.to_string()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                HashMap::new()
+            };
+
+            return handlers::handle_copy_object(
+                storage,
+                bucket,
+                key,
+                copy_source,
+                metadata,
+            )
+            .await;
         }
     }
 
@@ -202,7 +241,21 @@ async fn dispatch<S: Storage>(
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .unwrap_or(S3Object::DEFAULT_CONTENT_TYPE);
-        return handlers::handle_put_object(storage, bucket, key, content_type, body).await;
+
+        // Extract x-amz-meta-* headers into a metadata map.
+        let metadata: HashMap<String, String> = headers
+            .iter()
+            .filter_map(|(name, value)| {
+                let name_str = name.as_str().to_lowercase();
+                if let Some(key) = name_str.strip_prefix("x-amz-meta-") {
+                    value.to_str().ok().map(|v| (key.to_string(), v.to_string()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        return handlers::handle_put_object(storage, bucket, key, content_type, metadata, body).await;
     }
 
     // ---- 15. GET /{bucket}/{key}?uploadId=ID → ListParts ---------------
@@ -396,11 +449,38 @@ fn method_not_allowed(method: &Method) -> AwsError {
 async fn body_to_bytes(body: Body) -> Result<Bytes, AwsError> {
     axum::body::to_bytes(body, MAX_UPLOAD_SIZE)
         .await
-        .map_err(|_e| {
-            AwsError::new(AwsErrorKind::InternalError {
-                details: None,
-            })
+        .map_err(|e| {
+            if e.to_string().contains("length limit exceeded") {
+                AwsError::new(AwsErrorKind::EntityTooLarge {
+                    entity: "request body".into(),
+                })
+            } else {
+                AwsError::new(AwsErrorKind::InternalError {
+                    details: Some(format!("body read failed: {e}")),
+                })
+            }
         })
+}
+
+// ---------------------------------------------------------------------------
+// Path traversal validation
+// ---------------------------------------------------------------------------
+
+/// Validate that a bucket or key does not contain path traversal sequences.
+///
+/// Returns an `InvalidArgument` error if any path segment equals `..`, which
+/// has no legitimate use in S3 bucket names or object keys and is a security
+/// concern if the storage layer ever gains filesystem persistence.
+fn validate_no_path_traversal(value: &str, argument_name: &str) -> Result<(), AwsError> {
+    for segment in value.split('/') {
+        if segment == ".." {
+            return Err(AwsError::new(AwsErrorKind::InvalidArgument {
+                argument_name: argument_name.to_string(),
+                value: value.to_string(),
+            }));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -418,9 +498,17 @@ async fn body_to_bytes(body: Body) -> Result<Bytes, AwsError> {
 /// Returns `InvalidArgument` (HTTP 400) when the value contains a URL
 /// scheme (`://`), lacks a `/` separator between bucket and key, or has
 /// an empty bucket name.
-fn validate_copy_source(copy_source: &str) -> Result<(&str, &str), AwsError> {
+pub(crate) fn validate_copy_source(copy_source: &str) -> Result<(&str, &str), AwsError> {
     // Reject URL schemes (SSRF protection)
     if copy_source.contains("://") {
+        return Err(AwsError::new(AwsErrorKind::InvalidArgument {
+            argument_name: "x-amz-copy-source".into(),
+            value: copy_source.into(),
+        }));
+    }
+
+    // Reject protocol-relative URLs (SSRF bypass, e.g. "//internal/secret").
+    if copy_source.starts_with("//") {
         return Err(AwsError::new(AwsErrorKind::InvalidArgument {
             argument_name: "x-amz-copy-source".into(),
             value: copy_source.into(),
@@ -445,6 +533,10 @@ fn validate_copy_source(copy_source: &str) -> Result<(&str, &str), AwsError> {
             value: copy_source.into(),
         }));
     }
+
+    // Reject path traversal in source bucket or key.
+    validate_no_path_traversal(src_bucket, "x-amz-copy-source")?;
+    validate_no_path_traversal(src_key, "x-amz-copy-source")?;
 
     Ok((src_bucket, src_key))
 }
@@ -844,6 +936,59 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // body_to_bytes
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_body_to_bytes_success() {
+        let body = Body::from("hello world");
+        let result = body_to_bytes(body).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), &b"hello world"[..]);
+    }
+
+    #[tokio::test]
+    async fn test_body_to_bytes_body_read_error_preserves_details() {
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+        use http_body::{Body as HttpBody, Frame};
+
+        /// A body that fails immediately on read — used to verify that
+        /// `body_to_bytes` preserves the original error context instead of
+        /// swallowing it.
+        struct FailingBody;
+
+        impl HttpBody for FailingBody {
+            type Data = Bytes;
+            type Error = Box<dyn std::error::Error + Send + Sync>;
+
+            fn poll_frame(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+                Poll::Ready(Some(Err("body read failure: connection reset".into())))
+            }
+
+            fn is_end_stream(&self) -> bool {
+                // We have no data to send, so immediately report end-of-stream
+                // after the error.
+                true
+            }
+        }
+
+        let body = Body::new(FailingBody);
+        let result = body_to_bytes(body).await;
+        let err = result.expect_err("expected error from failing body");
+        assert_eq!(err.error_code(), "InternalError");
+        assert_eq!(err.status_code(), 500);
+        assert!(
+            err.message().contains("body read failure: connection reset"),
+            "error message should preserve original error details, got: {}",
+            err.message()
+        );
+    }
+
+    // ------------------------------------------------------------------
     // validate_copy_source
     // ------------------------------------------------------------------
 
@@ -863,6 +1008,13 @@ mod tests {
     #[test]
     fn test_validate_copy_source_ssrf_https_url() {
         let result = validate_copy_source("https://internal.service/secret");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().status_code(), 400);
+    }
+
+    #[test]
+    fn test_validate_copy_source_ssrf_protocol_relative() {
+        let result = validate_copy_source("//169.254.169.254/latest/meta-data/");
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().status_code(), 400);
     }
@@ -891,6 +1043,118 @@ mod tests {
     fn test_validate_copy_source_valid_no_leading_slash() {
         let result = validate_copy_source("bucket/key");
         assert!(result.is_ok());
+    }
+
+    // ------------------------------------------------------------------
+    // validate_no_path_traversal
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_no_path_traversal_allows_normal_value() {
+        assert!(validate_no_path_traversal("normal-bucket", "bucket").is_ok());
+    }
+
+    #[test]
+    fn test_validate_no_path_traversal_allows_single_dot() {
+        // Single '.' is harmless and allowed by S3.
+        assert!(validate_no_path_traversal("bucket/./key", "key").is_ok());
+    }
+
+    #[test]
+    fn test_validate_no_path_traversal_allows_empty() {
+        assert!(validate_no_path_traversal("", "key").is_ok());
+    }
+
+    #[test]
+    fn test_validate_no_path_traversal_rejects_parent_dir_at_start() {
+        let err = validate_no_path_traversal("../other-bucket/secret.txt", "key").unwrap_err();
+        assert_eq!(err.status_code(), 400);
+        assert_eq!(err.error_code(), "InvalidArgument");
+    }
+
+    #[test]
+    fn test_validate_no_path_traversal_rejects_parent_dir_mid_key() {
+        let err = validate_no_path_traversal("foo/../bar", "key").unwrap_err();
+        assert_eq!(err.status_code(), 400);
+        assert_eq!(err.error_code(), "InvalidArgument");
+    }
+
+    #[test]
+    fn test_validate_no_path_traversal_rejects_parent_dir_at_end() {
+        let err = validate_no_path_traversal("foo/..", "key").unwrap_err();
+        assert_eq!(err.status_code(), 400);
+        assert_eq!(err.error_code(), "InvalidArgument");
+    }
+
+    #[test]
+    fn test_validate_no_path_traversal_rejects_bare_parent_dir() {
+        let err = validate_no_path_traversal("..", "bucket").unwrap_err();
+        assert_eq!(err.status_code(), 400);
+        assert_eq!(err.error_code(), "InvalidArgument");
+    }
+
+    #[test]
+    fn test_validate_no_path_traversal_rejects_multiple_parent_dirs() {
+        let err = validate_no_path_traversal("a/../../b", "key").unwrap_err();
+        assert_eq!(err.status_code(), 400);
+        assert_eq!(err.error_code(), "InvalidArgument");
+    }
+
+    // ------------------------------------------------------------------
+    // Dispatch: path traversal rejection
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_dispatch_rejects_path_traversal_in_bucket() {
+        // PUT /../key should be rejected — bucket contains ".."
+        let svc = test_service();
+        let req = test_request("PUT", "/../key", None, vec![]);
+        assert_status(&svc, req, 400).await;
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_rejects_path_traversal_in_key() {
+        // PUT /bucket/../key should be rejected — key contains ".."
+        let svc = test_service();
+        let req = test_request("PUT", "/bucket/../key", None, vec![]);
+        assert_status(&svc, req, 400).await;
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_allows_normal_paths() {
+        // Normal paths should still work.
+        let svc = test_service();
+        let req = test_request("PUT", "/my-bucket/my-key", None, vec![]);
+        // Bucket does not exist → 404 NoSuchBucket (not 400 InvalidArgument).
+        assert_handler_called(&svc, req, "handle_put_object", 404).await;
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_allows_single_dot_in_key() {
+        // Single '.' in key is harmless and should be allowed.
+        let svc = test_service();
+        let req = test_request("PUT", "/my-bucket/./my-key", None, vec![]);
+        assert_handler_called(&svc, req, "handle_put_object", 404).await;
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_allows_bucket_level_operations() {
+        // Bucket-level operations (no key) should still work.
+        let svc = test_service();
+        let req = test_request("GET", "/", None, vec![]);
+        assert_handler_called(&svc, req, "handle_list_buckets", 200).await;
+    }
+
+    #[tokio::test]
+    async fn test_validate_copy_source_rejects_path_traversal() {
+        let svc = test_service();
+        let req = test_request(
+            "PUT",
+            "/dest-bucket/dest-key",
+            None,
+            vec![("x-amz-copy-source", "/src-bucket/../secret")],
+        );
+        assert_status(&svc, req, 400).await;
     }
 
     // ------------------------------------------------------------------
@@ -954,14 +1218,14 @@ mod tests {
         let svc = test_service();
         let req = test_request("GET", "/my-bucket/my-key", None, vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_get_object", 501).await;
+        assert_handler_called(&svc, req, "handle_get_object", 404).await;
     }
 
     #[tokio::test]
     async fn test_dispatch_head_object() {
         let svc = test_service();
         let req = test_request("HEAD", "/my-bucket/my-key", None, vec![]);
-        assert_handler_called(&svc, req, "handle_head_object", 501).await;
+        assert_handler_called(&svc, req, "handle_head_object", 404).await;
     }
 
     #[tokio::test]
@@ -969,14 +1233,14 @@ mod tests {
         let svc = test_service();
         let req = test_request("PUT", "/my-bucket/my-key", None, vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_put_object", 501).await;
+        assert_handler_called(&svc, req, "handle_put_object", 404).await;
     }
 
     #[tokio::test]
     async fn test_dispatch_delete_object() {
         let svc = test_service();
         let req = test_request("DELETE", "/my-bucket/my-key", None, vec![]);
-        assert_handler_called(&svc, req, "handle_delete_object", 501).await;
+        assert_handler_called(&svc, req, "handle_delete_object", 404).await;
     }
 
     #[tokio::test]
@@ -989,7 +1253,7 @@ mod tests {
             vec![("x-amz-copy-source", "/source-bucket/source-key")],
         );
         // Source bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_copy_object", 501).await;
+        assert_handler_called(&svc, req, "handle_copy_object", 404).await;
     }
 
     #[tokio::test]
@@ -1134,7 +1398,8 @@ mod tests {
             None,
             vec![("x-amz-copy-source", "/src-bucket/src-key")],
         );
-        assert_handler_called(&svc, req, "handle_copy_object", 501).await;
+        // Source bucket does not exist → 404 NoSuchBucket.
+        assert_handler_called(&svc, req, "handle_copy_object", 404).await;
     }
 
     #[tokio::test]
@@ -1164,7 +1429,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_put_object", 501).await;
+        assert_handler_called(&svc, req, "handle_put_object", 404).await;
     }
 
     #[tokio::test]
@@ -1179,7 +1444,8 @@ mod tests {
             Some("partNumber=abc&uploadId=uid"),
             vec![],
         );
-        assert_handler_called(&svc, req, "handle_put_object", 501).await;
+        // Bucket does not exist → 404 NoSuchBucket.
+        assert_handler_called(&svc, req, "handle_put_object", 404).await;
     }
 
     #[tokio::test]
@@ -1299,7 +1565,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("GET", "/s3/bucket/key", None, vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_get_object", 501).await;
+        assert_handler_called(&svc, req, "handle_get_object", 404).await;
     }
 
     #[tokio::test]
