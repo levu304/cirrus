@@ -84,8 +84,9 @@ pub async fn incomplete_body_detection(
     let (parts, body) = request.into_parts();
 
     let collected = body.collect().await.map_err(|e| {
+        tracing::error!(error = %e, "Failed to read request body");
         aws_error_response(AwsError::new(AwsErrorKind::InternalError {
-            details: Some(format!("Failed to read request body: {e}")),
+            details: None,
         }))
     })?;
 
