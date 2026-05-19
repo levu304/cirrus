@@ -270,7 +270,6 @@ pub async fn handle_get_object<S: Storage>(
         .header("Content-Length", object.content_length().to_string())
         .header("ETag", &object.etag)
         .header("Last-Modified", format_http_date(object.last_modified))
-        .header("Accept-Ranges", "bytes")
         .header("x-amz-request-id", &request_id)
         .header("x-amz-id-2", "cirrus-v0.1.0");
 
@@ -304,7 +303,6 @@ pub async fn handle_head_object<S: Storage>(
         .header("Content-Length", object.content_length().to_string())
         .header("ETag", &object.etag)
         .header("Last-Modified", format_http_date(object.last_modified))
-        .header("Accept-Ranges", "bytes")
         .header("x-amz-request-id", &request_id)
         .header("x-amz-id-2", "cirrus-v0.1.0");
 
@@ -725,10 +723,6 @@ mod tests {
             .get("ETag")
             .map(|v| v.to_str().unwrap().to_string());
         let last_modified = resp.headers().get("Last-Modified").is_some();
-        let accept_ranges = resp
-            .headers()
-            .get("Accept-Ranges")
-            .map(|v| v.to_str().unwrap().to_string());
 
         let resp_body = body_to_string(resp.into_body()).await;
 
@@ -736,7 +730,6 @@ mod tests {
         assert_eq!(content_length.unwrap(), "20"); // "hello world from get".len() = 20
         assert_eq!(etag.unwrap(), format_etag(&body));
         assert!(last_modified);
-        assert_eq!(accept_ranges.unwrap(), "bytes");
         assert_eq!(resp_body, "hello world from get");
     }
 
@@ -837,14 +830,6 @@ mod tests {
             format_etag(&body)
         );
         assert!(resp.headers().get("Last-Modified").is_some());
-        assert_eq!(
-            resp.headers()
-                .get("Accept-Ranges")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "bytes"
-        );
 
         // Body must be empty for HEAD.
         let resp_body = body_to_string(resp.into_body()).await;
