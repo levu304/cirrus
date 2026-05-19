@@ -166,3 +166,212 @@ pub async fn entity_too_large_interceptor(
         Ok(response)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::middleware::from_fn;
+    use http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use std::convert::Infallible;
+    use tower::{service_fn, Service, ServiceBuilder, ServiceExt};
+
+    /// Consume a response body and return it as a string.
+    async fn body_to_string(resp: Response<Body>) -> String {
+        let collected = resp.into_body().collect().await.unwrap();
+        String::from_utf8(collected.to_bytes().to_vec()).unwrap()
+    }
+
+    // ------------------------------------------------------------------
+    // incomplete_body_detection tests
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn body_matches_content_length() {
+        let mut svc = ServiceBuilder::new()
+            .layer(from_fn(incomplete_body_detection))
+            .service(service_fn(|_req: Request<Body>| async {
+                Ok::<_, Infallible>(Response::new(Body::from("ok")))
+            }));
+
+        let req = Request::builder()
+            .header("Content-Length", "5")
+            .body(Body::from("hello"))
+            .unwrap();
+        let resp = svc.ready().await.unwrap().call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn body_shorter_than_content_length() {
+        let mut svc = ServiceBuilder::new()
+            .layer(from_fn(incomplete_body_detection))
+            .service(service_fn(|_req: Request<Body>| async {
+                Ok::<_, Infallible>(Response::new(Body::from("ok")))
+            }));
+
+        let req = Request::builder()
+            .header("Content-Length", "10")
+            .body(Body::from("hello"))
+            .unwrap();
+        let resp = svc.ready().await.unwrap().call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let xml = body_to_string(resp).await;
+        assert!(xml.contains("IncompleteBody"));
+    }
+
+    #[tokio::test]
+    async fn body_longer_than_content_length() {
+        let mut svc = ServiceBuilder::new()
+            .layer(from_fn(incomplete_body_detection))
+            .service(service_fn(|_req: Request<Body>| async {
+                Ok::<_, Infallible>(Response::new(Body::from("ok")))
+            }));
+
+        let req = Request::builder()
+            .header("Content-Length", "5")
+            .body(Body::from("helloworld"))
+            .unwrap();
+        let resp = svc.ready().await.unwrap().call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let xml = body_to_string(resp).await;
+        assert!(xml.contains("IncompleteBody"));
+    }
+
+    #[tokio::test]
+    async fn no_content_length_header() {
+        let mut svc = ServiceBuilder::new()
+            .layer(from_fn(incomplete_body_detection))
+            .service(service_fn(|_req: Request<Body>| async {
+                Ok::<_, Infallible>(Response::new(Body::from("ok")))
+            }));
+
+        let req = Request::builder()
+            .body(Body::from("hello"))
+            .unwrap();
+        let resp = svc.ready().await.unwrap().call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn non_utf8_content_length() {
+        // Non-UTF8 header values cannot be constructed through the public
+        // `http::HeaderValue` API — `from_bytes` rejects bytes above 0x7E.
+        // This edge case is therefore unreachable through normal request
+        // construction. The middleware handles it by treating the value as
+        // absent (pass-through, same as no Content-Length).
+        let mut svc = ServiceBuilder::new()
+            .layer(from_fn(incomplete_body_detection))
+            .service(service_fn(|_req: Request<Body>| async {
+                Ok::<_, Infallible>(Response::new(Body::from("ok")))
+            }));
+
+        let req = Request::builder()
+            .body(Body::from("hello"))
+            .unwrap();
+        let resp = svc.ready().await.unwrap().call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn content_length_exceeds_max() {
+        let mut svc = ServiceBuilder::new()
+            .layer(from_fn(incomplete_body_detection))
+            .service(service_fn(|_req: Request<Body>| async {
+                Ok::<_, Infallible>(Response::new(Body::from("ok")))
+            }));
+
+        // MAX_REQUEST_BYTES = 100 * 1024 * 1024 = 104857600
+        let req = Request::builder()
+            .header("Content-Length", "999999999")
+            .body(Body::empty())
+            .unwrap();
+        let resp = svc.ready().await.unwrap().call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let xml = body_to_string(resp).await;
+        assert!(xml.contains("EntityTooLarge"));
+    }
+
+    #[tokio::test]
+    async fn malformed_content_length() {
+        let mut svc = ServiceBuilder::new()
+            .layer(from_fn(incomplete_body_detection))
+            .service(service_fn(|_req: Request<Body>| async {
+                Ok::<_, Infallible>(Response::new(Body::from("ok")))
+            }));
+
+        let req = Request::builder()
+            .header("Content-Length", "abc")
+            .body(Body::from("hello"))
+            .unwrap();
+        let resp = svc.ready().await.unwrap().call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let xml = body_to_string(resp).await;
+        assert!(xml.contains("MissingRequestHeader"));
+    }
+
+    // ------------------------------------------------------------------
+    // entity_too_large_interceptor tests
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn passes_non_413_through() {
+        let mut svc = ServiceBuilder::new()
+            .layer(from_fn(entity_too_large_interceptor))
+            .service(service_fn(|_req: Request<Body>| async {
+                Ok::<_, Infallible>(Response::new(Body::from("ok")))
+            }));
+
+        let req = Request::builder()
+            .body(Body::from("hello"))
+            .unwrap();
+        let resp = svc.ready().await.unwrap().call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn converts_413_to_400_entity_too_large() {
+        let mut svc = ServiceBuilder::new()
+            .layer(from_fn(entity_too_large_interceptor))
+            .service(service_fn(|_req: Request<Body>| async {
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .status(StatusCode::PAYLOAD_TOO_LARGE)
+                        .body(Body::from("too big"))
+                        .unwrap(),
+                )
+            }));
+
+        let req = Request::builder()
+            .body(Body::from("hello"))
+            .unwrap();
+        let resp = svc.ready().await.unwrap().call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let xml = body_to_string(resp).await;
+        assert!(xml.contains("EntityTooLarge"));
+    }
+
+    #[tokio::test]
+    async fn converts_413_and_consumes_original_body() {
+        let mut svc = ServiceBuilder::new()
+            .layer(from_fn(entity_too_large_interceptor))
+            .service(service_fn(|_req: Request<Body>| async {
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .status(StatusCode::PAYLOAD_TOO_LARGE)
+                        .body(Body::from("original 413 body text"))
+                        .unwrap(),
+                )
+            }));
+
+        let req = Request::builder()
+            .body(Body::from("hello"))
+            .unwrap();
+        let resp = svc.ready().await.unwrap().call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let xml = body_to_string(resp).await;
+        assert!(xml.contains("EntityTooLarge"));
+        assert!(!xml.contains("original 413 body text"));
+    }
+}
