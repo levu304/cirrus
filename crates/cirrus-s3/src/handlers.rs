@@ -182,6 +182,39 @@ pub async fn handle_copy_object<S: Storage>(
         }))
 }
 
+/// Sanitize a Content-Type value to prevent stored XSS.
+///
+/// If the Content-Type is empty or matches a dangerous prefix that browsers
+/// would render as active documents (HTML, SVG, JavaScript, XHTML, XML),
+/// returns [`S3Object::DEFAULT_CONTENT_TYPE`] (`"binary/octet-stream"`).
+/// Otherwise returns the content type unchanged.
+fn sanitize_content_type(content_type: &str) -> &str {
+    let trimmed = content_type.trim();
+
+    if trimmed.is_empty() {
+        return S3Object::DEFAULT_CONTENT_TYPE;
+    }
+
+    // Content-Type prefixes that browsers may render as active documents.
+    // Matching by prefix also catches variants like `text/html; charset=utf-8`.
+    const DANGEROUS_PREFIXES: &[&str] = &[
+        "text/html",
+        "application/xhtml+xml",
+        "image/svg+xml",
+        "text/javascript",
+        "application/javascript",
+        "application/ecmascript",
+        "text/ecmascript",
+        "application/xml",
+    ];
+
+    if DANGEROUS_PREFIXES.iter().any(|p| trimmed.starts_with(p)) {
+        return S3Object::DEFAULT_CONTENT_TYPE;
+    }
+
+    content_type
+}
+
 /// PUT /{bucket}/{key} — upload an object.
 pub async fn handle_put_object<S: Storage>(
     storage: &S,
@@ -191,11 +224,7 @@ pub async fn handle_put_object<S: Storage>(
     metadata: HashMap<String, String>,
     body: Bytes,
 ) -> Result<Response<Body>, AwsError> {
-    let content_type = if content_type.is_empty() {
-        S3Object::DEFAULT_CONTENT_TYPE
-    } else {
-        content_type
-    };
+    let content_type = sanitize_content_type(content_type);
 
     let etag = format_etag(&body);
     let object = S3Object {
@@ -575,6 +604,86 @@ mod tests {
             .await
             .expect("object should exist");
         assert_eq!(result.object.content_type, S3Object::DEFAULT_CONTENT_TYPE);
+    }
+
+    #[tokio::test]
+    async fn test_put_object_sanitizes_dangerous_content_types() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("sanitize-ct-test").await.unwrap();
+
+        let dangerous_types = [
+            "text/html",
+            "application/xhtml+xml",
+            "image/svg+xml",
+            "text/javascript",
+            "application/javascript",
+            "application/ecmascript",
+            "text/ecmascript",
+            "application/xml",
+        ];
+
+        for ct in dangerous_types {
+            let body = Bytes::from("content");
+            handle_put_object(
+                &storage,
+                "sanitize-ct-test",
+                "obj",
+                ct,
+                HashMap::new(),
+                body,
+            )
+            .await
+            .expect("put_object should succeed");
+
+            let result = storage
+                .get_object("sanitize-ct-test", "obj")
+                .await
+                .expect("object should exist");
+            assert_eq!(
+                result.object.content_type,
+                S3Object::DEFAULT_CONTENT_TYPE,
+                "content_type should be sanitized from \"{}\" to {}",
+                ct,
+                S3Object::DEFAULT_CONTENT_TYPE,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_put_object_preserves_safe_content_types() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("preserve-ct-test").await.unwrap();
+
+        let safe_types = [
+            ("application/json", "application/json"),
+            ("image/png", "image/png"),
+            ("text/plain; charset=utf-8", "text/plain; charset=utf-8"),
+            ("application/pdf", "application/pdf"),
+        ];
+
+        for (input, expected) in safe_types {
+            let body = Bytes::from("content");
+            handle_put_object(
+                &storage,
+                "preserve-ct-test",
+                "obj",
+                input,
+                HashMap::new(),
+                body,
+            )
+            .await
+            .expect("put_object should succeed");
+
+            let result = storage
+                .get_object("preserve-ct-test", "obj")
+                .await
+                .expect("object should exist");
+            assert_eq!(
+                result.object.content_type, expected,
+                "safe content_type \"{}\" should pass through unchanged",
+                input,
+            );
+        }
     }
 
     #[tokio::test]
