@@ -25,6 +25,14 @@ use crate::address::{resolve_address, AddressError};
 use crate::handlers;
 use crate::storage::{Storage, S3Error};
 
+/// Maximum single-upload body size (5 GB, matching the S3 API specification).
+///
+/// This is a defense-in-depth cap on `body_to_bytes`.  The middleware layer
+/// (`RequestBodyLimitLayer` in cirrus-router) already limits request bodies to
+/// 100 MB, but if that configuration ever changes this constant acts as the
+/// last guard against unbodied body reads (a DoS vector).
+const MAX_UPLOAD_SIZE: usize = 5 * 1024 * 1024 * 1024; // 5 GB
+
 // ---------------------------------------------------------------------------
 // S3Service
 // ---------------------------------------------------------------------------
@@ -361,8 +369,12 @@ fn method_not_allowed(method: &Method) -> AwsError {
 }
 
 /// Consume an [`axum::body::Body`] and collect all bytes.
+///
+/// The body read is capped at [`MAX_UPLOAD_SIZE`] (5 GB) as a defense-in-depth
+/// measure — [`RequestBodyLimitLayer`] in `cirrus-router` provides the primary
+/// limit at 100 MB.
 async fn body_to_bytes(body: Body) -> Result<Bytes, AwsError> {
-    axum::body::to_bytes(body, usize::MAX)
+    axum::body::to_bytes(body, MAX_UPLOAD_SIZE)
         .await
         .map_err(|e| {
             AwsError::new(AwsErrorKind::InternalError {
@@ -894,5 +906,35 @@ mod tests {
         let (bucket, key) = resolve_bucket_or_key("/bucket/key", "localhost:9000").unwrap();
         assert_eq!(bucket, "bucket");
         assert_eq!(key, "key");
+    }
+
+    // ------------------------------------------------------------------
+    // body_to_bytes
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_max_upload_size_is_positive() {
+        assert!(MAX_UPLOAD_SIZE > 0, "MAX_UPLOAD_SIZE must be positive");
+    }
+
+    #[test]
+    fn test_max_upload_size_is_exactly_5gb() {
+        assert_eq!(MAX_UPLOAD_SIZE, 5 * 1024 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn test_body_to_bytes_small_body() {
+        let body = Body::from("hello world");
+        let result = body_to_bytes(body).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Bytes::from("hello world"));
+    }
+
+    #[tokio::test]
+    async fn test_body_to_bytes_empty_body() {
+        let body = Body::empty();
+        let result = body_to_bytes(body).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
     }
 }
