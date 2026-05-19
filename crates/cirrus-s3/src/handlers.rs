@@ -702,6 +702,105 @@ mod tests {
         assert_eq!(err.error_code(), "NoSuchBucket");
     }
 
+    #[tokio::test]
+    async fn test_put_object_with_empty_body() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("empty-put-test").await.unwrap();
+
+        let body = Bytes::new();
+        let resp = handle_put_object(
+            &storage,
+            "empty-put-test",
+            "empty.txt",
+            "text/plain",
+            HashMap::new(),
+            body.clone(),
+        )
+        .await
+        .expect("put_object with empty body should succeed");
+        assert_eq!(resp.status(), 200);
+
+        // MD5 of empty data.
+        let expected_etag = format_etag(&body);
+        assert_eq!(
+            resp.headers().get("ETag").unwrap().to_str().unwrap(),
+            expected_etag
+        );
+
+        // Verify the stored body is empty and content_type is preserved.
+        let result = storage
+            .get_object("empty-put-test", "empty.txt")
+            .await
+            .expect("stored object should be retrievable");
+        assert!(result.object.data.is_empty(), "stored body should be empty");
+        assert_eq!(result.object.content_type, "text/plain");
+    }
+
+    #[tokio::test]
+    async fn test_put_object_overwrites_existing_key() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("overwrite-test").await.unwrap();
+
+        // First PUT.
+        let original_body = Bytes::from("original data");
+        let resp1 = handle_put_object(
+            &storage,
+            "overwrite-test",
+            "file.txt",
+            "text/plain",
+            HashMap::new(),
+            original_body.clone(),
+        )
+        .await
+        .expect("first put_object should succeed");
+        assert_eq!(resp1.status(), 200);
+        let original_etag = resp1
+            .headers()
+            .get("ETag")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        // Second PUT — overwrite with new data.
+        let new_body = Bytes::from("overwritten data");
+        let resp2 = handle_put_object(
+            &storage,
+            "overwrite-test",
+            "file.txt",
+            "text/plain",
+            HashMap::new(),
+            new_body.clone(),
+        )
+        .await
+        .expect("second put_object should succeed");
+        assert_eq!(resp2.status(), 200);
+        let new_etag = resp2
+            .headers()
+            .get("ETag")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        // ETags must differ because the bodies differ.
+        assert_ne!(original_etag, new_etag);
+
+        // Get the object and verify it contains the new data.
+        let result = storage
+            .get_object("overwrite-test", "file.txt")
+            .await
+            .expect("object should exist after overwrite");
+        assert_eq!(
+            result.object.data, new_body,
+            "stored body should be the overwritten data"
+        );
+        assert_eq!(
+            result.object.etag, new_etag,
+            "stored ETag should reflect the new body"
+        );
+    }
+
     // -- handle_get_object tests -----------------------------------------
 
     #[tokio::test]
@@ -892,6 +991,16 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.status_code(), 404);
         assert_eq!(err.error_code(), "NoSuchKey");
+    }
+
+    #[tokio::test]
+    async fn test_head_object_returns_404_no_such_bucket() {
+        let storage = DefaultStorage::new();
+        let err = handle_head_object(&storage, "no-such-head-bucket", "key")
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), 404);
+        assert_eq!(err.error_code(), "NoSuchBucket");
     }
 
     #[tokio::test]
@@ -1115,6 +1224,30 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.status_code(), 400);
         assert_eq!(err.error_code(), "InvalidArgument");
+    }
+
+    #[tokio::test]
+    async fn test_copy_object_returns_404_no_such_source_key() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("copy-src-key-test").await.unwrap();
+        storage.create_bucket("copy-dst-key-test").await.unwrap();
+
+        let err = handle_copy_object(
+            &storage,
+            "copy-dst-key-test",
+            "dest.txt",
+            "/copy-src-key-test/nonexistent-key",
+            HashMap::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status_code(), 404);
+        assert_eq!(err.error_code(), "NoSuchKey");
+        assert!(
+            err.message().contains("copy-src-key-test"),
+            "expected message to reference the source bucket/key, got: {}",
+            err.message()
+        );
     }
 
     #[tokio::test]
