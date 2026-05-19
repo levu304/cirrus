@@ -143,6 +143,11 @@ pub async fn handle_delete_objects<S: Storage>(
     Err(AwsError::new(AwsErrorKind::NotImplemented))
 }
 
+/// Opaque value for the x-amz-id-2 response header.
+/// Must NOT leak version or implementation details — real AWS S3 returns
+/// a base64-looking opaque token.
+const S3_ID_2: &str = "4v8y2k5j9h3q1w7e6r0t4v8y2k5j9h3q1w7e6r0t";
+
 // ---------------------------------------------------------------------------
 // Object-level handlers (Phase 5c)
 // ---------------------------------------------------------------------------
@@ -180,7 +185,7 @@ pub async fn handle_copy_object<S: Storage>(
         .status(200)
         .header("Content-Type", "application/xml")
         .header("x-amz-request-id", &request_id)
-        .header("x-amz-id-2", "cirrus-v0.1.0")
+        .header("x-amz-id-2", S3_ID_2)
         .body(Body::from(xml))
         .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
             details: Some(format!("response build failed: {e}")),
@@ -249,7 +254,7 @@ pub async fn handle_put_object<S: Storage>(
         .status(200)
         .header("ETag", &etag)
         .header("x-amz-request-id", &request_id)
-        .header("x-amz-id-2", "cirrus-v0.1.0")
+        .header("x-amz-id-2", S3_ID_2)
         .body(Body::empty())
         .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
             details: Some(format!("response build failed: {e}")),
@@ -276,7 +281,7 @@ pub async fn handle_get_object<S: Storage>(
         .header("ETag", &object.etag)
         .header("Last-Modified", format_http_date(object.last_modified))
         .header("x-amz-request-id", &request_id)
-        .header("x-amz-id-2", "cirrus-v0.1.0");
+        .header("x-amz-id-2", S3_ID_2);
 
     for (key, value) in &object.metadata {
         builder = builder.header(format!("x-amz-meta-{}", key), value);
@@ -309,7 +314,7 @@ pub async fn handle_head_object<S: Storage>(
         .header("ETag", &object.etag)
         .header("Last-Modified", format_http_date(object.last_modified))
         .header("x-amz-request-id", &request_id)
-        .header("x-amz-id-2", "cirrus-v0.1.0");
+        .header("x-amz-id-2", S3_ID_2);
 
     for (key, value) in &object.metadata {
         builder = builder.header(format!("x-amz-meta-{}", key), value);
@@ -342,7 +347,7 @@ pub async fn handle_delete_object<S: Storage>(
     Response::builder()
         .status(204)
         .header("x-amz-request-id", &request_id)
-        .header("x-amz-id-2", "cirrus-v0.1.0")
+        .header("x-amz-id-2", S3_ID_2)
         .body(Body::empty())
         .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
             details: Some(format!("response build failed: {e}")),
@@ -571,7 +576,7 @@ mod tests {
         assert!(resp.headers().get("x-amz-request-id").is_some());
         assert_eq!(
             resp.headers().get("x-amz-id-2").unwrap().to_str().unwrap(),
-            "cirrus-v0.1.0"
+            S3_ID_2
         );
 
         // Verify the object was actually stored.

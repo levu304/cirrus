@@ -86,6 +86,12 @@ impl<S: Storage> AwsService for S3Service<S> {
         // --- 4. Resolve bucket + key -------------------------------------
         let (bucket, key) = resolve_bucket_or_key(&s3_path, host)?;
 
+        // --- 4b. Validate no path traversal ------------------------------
+        validate_no_path_traversal(&bucket, "bucket")?;
+        if !key.is_empty() {
+            validate_no_path_traversal(&key, "key")?;
+        }
+
         // --- 5. Parse query parameters -----------------------------------
         let query_params = parse_query(&query);
 
@@ -457,6 +463,27 @@ async fn body_to_bytes(body: Body) -> Result<Bytes, AwsError> {
 }
 
 // ---------------------------------------------------------------------------
+// Path traversal validation
+// ---------------------------------------------------------------------------
+
+/// Validate that a bucket or key does not contain path traversal sequences.
+///
+/// Returns an `InvalidArgument` error if any path segment equals `..`, which
+/// has no legitimate use in S3 bucket names or object keys and is a security
+/// concern if the storage layer ever gains filesystem persistence.
+fn validate_no_path_traversal(value: &str, argument_name: &str) -> Result<(), AwsError> {
+    for segment in value.split('/') {
+        if segment == ".." {
+            return Err(AwsError::new(AwsErrorKind::InvalidArgument {
+                argument_name: argument_name.to_string(),
+                value: value.to_string(),
+            }));
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Copy-source validation (SSRF defense)
 // ---------------------------------------------------------------------------
 
@@ -506,6 +533,10 @@ pub(crate) fn validate_copy_source(copy_source: &str) -> Result<(&str, &str), Aw
             value: copy_source.into(),
         }));
     }
+
+    // Reject path traversal in source bucket or key.
+    validate_no_path_traversal(src_bucket, "x-amz-copy-source")?;
+    validate_no_path_traversal(src_key, "x-amz-copy-source")?;
 
     Ok((src_bucket, src_key))
 }
@@ -1012,6 +1043,118 @@ mod tests {
     fn test_validate_copy_source_valid_no_leading_slash() {
         let result = validate_copy_source("bucket/key");
         assert!(result.is_ok());
+    }
+
+    // ------------------------------------------------------------------
+    // validate_no_path_traversal
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_no_path_traversal_allows_normal_value() {
+        assert!(validate_no_path_traversal("normal-bucket", "bucket").is_ok());
+    }
+
+    #[test]
+    fn test_validate_no_path_traversal_allows_single_dot() {
+        // Single '.' is harmless and allowed by S3.
+        assert!(validate_no_path_traversal("bucket/./key", "key").is_ok());
+    }
+
+    #[test]
+    fn test_validate_no_path_traversal_allows_empty() {
+        assert!(validate_no_path_traversal("", "key").is_ok());
+    }
+
+    #[test]
+    fn test_validate_no_path_traversal_rejects_parent_dir_at_start() {
+        let err = validate_no_path_traversal("../other-bucket/secret.txt", "key").unwrap_err();
+        assert_eq!(err.status_code(), 400);
+        assert_eq!(err.error_code(), "InvalidArgument");
+    }
+
+    #[test]
+    fn test_validate_no_path_traversal_rejects_parent_dir_mid_key() {
+        let err = validate_no_path_traversal("foo/../bar", "key").unwrap_err();
+        assert_eq!(err.status_code(), 400);
+        assert_eq!(err.error_code(), "InvalidArgument");
+    }
+
+    #[test]
+    fn test_validate_no_path_traversal_rejects_parent_dir_at_end() {
+        let err = validate_no_path_traversal("foo/..", "key").unwrap_err();
+        assert_eq!(err.status_code(), 400);
+        assert_eq!(err.error_code(), "InvalidArgument");
+    }
+
+    #[test]
+    fn test_validate_no_path_traversal_rejects_bare_parent_dir() {
+        let err = validate_no_path_traversal("..", "bucket").unwrap_err();
+        assert_eq!(err.status_code(), 400);
+        assert_eq!(err.error_code(), "InvalidArgument");
+    }
+
+    #[test]
+    fn test_validate_no_path_traversal_rejects_multiple_parent_dirs() {
+        let err = validate_no_path_traversal("a/../../b", "key").unwrap_err();
+        assert_eq!(err.status_code(), 400);
+        assert_eq!(err.error_code(), "InvalidArgument");
+    }
+
+    // ------------------------------------------------------------------
+    // Dispatch: path traversal rejection
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_dispatch_rejects_path_traversal_in_bucket() {
+        // PUT /../key should be rejected — bucket contains ".."
+        let svc = test_service();
+        let req = test_request("PUT", "/../key", None, vec![]);
+        assert_status(&svc, req, 400).await;
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_rejects_path_traversal_in_key() {
+        // PUT /bucket/../key should be rejected — key contains ".."
+        let svc = test_service();
+        let req = test_request("PUT", "/bucket/../key", None, vec![]);
+        assert_status(&svc, req, 400).await;
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_allows_normal_paths() {
+        // Normal paths should still work.
+        let svc = test_service();
+        let req = test_request("PUT", "/my-bucket/my-key", None, vec![]);
+        // Bucket does not exist → 404 NoSuchBucket (not 400 InvalidArgument).
+        assert_handler_called(&svc, req, "handle_put_object", 404).await;
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_allows_single_dot_in_key() {
+        // Single '.' in key is harmless and should be allowed.
+        let svc = test_service();
+        let req = test_request("PUT", "/my-bucket/./my-key", None, vec![]);
+        assert_handler_called(&svc, req, "handle_put_object", 404).await;
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_allows_bucket_level_operations() {
+        // Bucket-level operations (no key) should still work.
+        let svc = test_service();
+        let req = test_request("GET", "/", None, vec![]);
+        assert_handler_called(&svc, req, "handle_list_buckets", 200).await;
+    }
+
+    #[tokio::test]
+    async fn test_validate_copy_source_rejects_path_traversal() {
+        let svc = test_service();
+        let req = test_request(
+            "PUT",
+            "/dest-bucket/dest-key",
+            None,
+            vec![("x-amz-copy-source", "/src-bucket/../secret")],
+        );
+        assert_status(&svc, req, 400).await;
     }
 
     // ------------------------------------------------------------------
