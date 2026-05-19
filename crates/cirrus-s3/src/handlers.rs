@@ -71,7 +71,7 @@ pub async fn handle_create_bucket<S: Storage>(
     })?;
 
     let output = CreateBucketOutput {
-        location: format!("http://localhost:4566/{}", bucket),
+        location: format!("https://localhost:4566/{}", bucket),
     };
 
     let xml = serialize(&output, "CreateBucketOutput")?;
@@ -467,10 +467,10 @@ mod tests {
         let resp = handle_create_bucket(&storage, "my-new-bucket").await.expect("should succeed");
         assert_eq!(resp.status(), 200);
         let location = resp.headers().get("Location").unwrap().to_str().unwrap();
-        assert_eq!(location, "http://localhost:4566/my-new-bucket");
+        assert_eq!(location, "https://localhost:4566/my-new-bucket");
         let body = body_to_string(resp.into_body()).await;
         assert!(body.contains("<CreateBucketOutput"));
-        assert!(body.contains("<Location>http://localhost:4566/my-new-bucket</Location>"));
+        assert!(body.contains("<Location>https://localhost:4566/my-new-bucket</Location>"));
     }
 
     #[tokio::test]
