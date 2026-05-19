@@ -394,9 +394,9 @@ fn method_not_allowed(method: &Method) -> AwsError {
 async fn body_to_bytes(body: Body) -> Result<Bytes, AwsError> {
     axum::body::to_bytes(body, MAX_UPLOAD_SIZE)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             AwsError::new(AwsErrorKind::InternalError {
-                details: Some(format!("Failed to read request body: {}", e)),
+                details: None,
             })
         })
 }
