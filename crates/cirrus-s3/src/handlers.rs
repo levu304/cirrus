@@ -159,7 +159,10 @@ pub async fn handle_copy_object<S: Storage>(
     let obj = storage
         .copy_object(src_bucket, src_key, dst_bucket, dst_key)
         .await
-        .map_err(|e| s3_error_to_aws(e, src_bucket, src_key))?;
+        .map_err(|e| match e {
+            S3Error::NoSuchBucket => s3_error_to_aws(e, dst_bucket, dst_key),
+            other => s3_error_to_aws(other, src_bucket, src_key),
+        })?;
 
     let result = CopyObjectResult {
         etag: obj.etag,
@@ -957,6 +960,46 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.status_code(), 404);
         assert_eq!(err.error_code(), "NoSuchBucket");
+        assert!(
+            err.message().contains("copy-dst-404"),
+            "expected message to reference the destination bucket (the context used for NoSuchBucket in copy_object), got: {}",
+            err.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_copy_object_returns_404_no_such_destination_bucket() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("copy-src-404-dst").await.unwrap();
+
+        let body = Bytes::from("content for dest-bucket test");
+        handle_put_object(
+            &storage,
+            "copy-src-404-dst",
+            "source.txt",
+            "text/plain",
+            HashMap::new(),
+            body,
+        )
+        .await
+        .expect("put_object should succeed");
+
+        // Do NOT create "no-such-dst-bucket".
+        let err = handle_copy_object(
+            &storage,
+            "no-such-dst-bucket",
+            "dest.txt",
+            "/copy-src-404-dst/source.txt",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status_code(), 404);
+        assert_eq!(err.error_code(), "NoSuchBucket");
+        assert!(
+            err.message().contains("no-such-dst-bucket"),
+            "expected message to reference the missing destination bucket, got: {}",
+            err.message()
+        );
     }
 
     #[tokio::test]
