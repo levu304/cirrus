@@ -98,12 +98,12 @@ pub async fn incomplete_body_detection(
     // Run the inner handler.
     let response = next.run(request).await;
 
-    // If fewer bytes were consumed than declared, return IncompleteBody.
-    if actual < expected {
+    // If body bytes don't match the declared Content-Length, return IncompleteBody.
+    if actual != expected {
         tracing::warn!(
             content_length = expected,
             actual_bytes = actual,
-            "Request body shorter than declared Content-Length"
+            "Request body size does not match declared Content-Length"
         );
         Ok(aws_error_response(
             AwsError::new(AwsErrorKind::IncompleteBody),
