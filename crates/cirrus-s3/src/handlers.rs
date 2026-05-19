@@ -148,16 +148,21 @@ pub async fn handle_delete_objects<S: Storage>(
 // ---------------------------------------------------------------------------
 
 /// PUT /{bucket}/{key} with x-amz-copy-source header — copy an object.
+///
+/// When `metadata` is non-empty (x-amz-metadata-directive: REPLACE), the
+/// provided metadata replaces the source object's metadata.  An empty map
+/// means the source metadata is preserved (COPY mode, the default).
 pub async fn handle_copy_object<S: Storage>(
     storage: &S,
     dst_bucket: &str,
     dst_key: &str,
     copy_source: &str,
+    metadata: HashMap<String, String>,
 ) -> Result<Response<Body>, AwsError> {
     let (src_bucket, src_key) = validate_copy_source(copy_source)?;
 
     let obj = storage
-        .copy_object(src_bucket, src_key, dst_bucket, dst_key)
+        .copy_object(src_bucket, src_key, dst_bucket, dst_key, &metadata)
         .await
         .map_err(|e| match e {
             S3Error::NoSuchBucket => s3_error_to_aws(e, dst_bucket, dst_key),
@@ -992,7 +997,7 @@ mod tests {
             .await
             .expect("put_object");
 
-        let resp = handle_copy_object(&storage, "copy-dst", "dest.txt", "/copy-src/source.txt")
+        let resp = handle_copy_object(&storage, "copy-dst", "dest.txt", "/copy-src/source.txt", HashMap::new())
             .await
             .expect("copy_object should succeed");
         assert_eq!(resp.status(), 200);
@@ -1040,6 +1045,7 @@ mod tests {
             "copy-dst-404",
             "dest.txt",
             "/no-such-src/source.txt",
+            HashMap::new(),
         )
         .await
         .unwrap_err();
@@ -1075,6 +1081,7 @@ mod tests {
             "no-such-dst-bucket",
             "dest.txt",
             "/copy-src-404-dst/source.txt",
+            HashMap::new(),
         )
         .await
         .unwrap_err();
@@ -1097,6 +1104,7 @@ mod tests {
             "dst",
             "key",
             "http://evil.com/steal",
+            HashMap::new(),
         )
         .await
         .unwrap_err();
@@ -1114,7 +1122,7 @@ mod tests {
             .await
             .expect("put_object");
 
-        let resp = handle_copy_object(&storage, "b", "copy.txt", "/b/original.txt")
+        let resp = handle_copy_object(&storage, "b", "copy.txt", "/b/original.txt", HashMap::new())
             .await
             .expect("copy_object same bucket");
         assert_eq!(resp.status(), 200);
@@ -1123,5 +1131,177 @@ mod tests {
         let orig = storage.get_object("b", "original.txt").await.unwrap();
         let copy = storage.get_object("b", "copy.txt").await.unwrap();
         assert_eq!(orig.object.data, copy.object.data);
+    }
+
+    // -- CopyObject metadata directive tests -----------------------------
+
+    #[tokio::test]
+    async fn test_copy_object_with_metadata_copy() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("meta-copy-src").await.unwrap();
+        storage.create_bucket("meta-copy-dst").await.unwrap();
+
+        // PUT source object with metadata.
+        let mut src_metadata = HashMap::new();
+        src_metadata.insert("Color".into(), "Red".into());
+        src_metadata.insert("Project".into(), "Alpha".into());
+
+        let body = Bytes::from("metadata copy test");
+        handle_put_object(
+            &storage,
+            "meta-copy-src",
+            "source.txt",
+            "text/plain",
+            src_metadata,
+            body.clone(),
+        )
+        .await
+        .expect("put_object");
+
+        // COPY without metadata-directive (defaults to COPY mode).
+        let resp = handle_copy_object(
+            &storage,
+            "meta-copy-dst",
+            "dest.txt",
+            "/meta-copy-src/source.txt",
+            HashMap::new(), // empty = COPY mode
+        )
+        .await
+        .expect("copy_object should succeed");
+        assert_eq!(resp.status(), 200);
+
+        // Verify destination has source metadata.
+        let dst = storage
+            .get_object("meta-copy-dst", "dest.txt")
+            .await
+            .expect("copied object should exist");
+        assert_eq!(
+            dst.object.metadata.get("Color").map(|s| s.as_str()),
+            Some("Red"),
+            "COPY mode should preserve source metadata"
+        );
+        assert_eq!(
+            dst.object.metadata.get("Project").map(|s| s.as_str()),
+            Some("Alpha"),
+            "COPY mode should preserve all source metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_copy_object_with_metadata_replace() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("meta-replace-src").await.unwrap();
+        storage.create_bucket("meta-replace-dst").await.unwrap();
+
+        // PUT source object with metadata.
+        let mut src_metadata = HashMap::new();
+        src_metadata.insert("Color".into(), "Red".into());
+        src_metadata.insert("Project".into(), "Alpha".into());
+
+        let body = Bytes::from("metadata replace test");
+        handle_put_object(
+            &storage,
+            "meta-replace-src",
+            "source.txt",
+            "text/plain",
+            src_metadata,
+            body.clone(),
+        )
+        .await
+        .expect("put_object");
+
+        // COPY with REPLACE metadata directive — new metadata replaces source.
+        let mut replace_metadata = HashMap::new();
+        replace_metadata.insert("Color".into(), "Blue".into());
+
+        let resp = handle_copy_object(
+            &storage,
+            "meta-replace-dst",
+            "dest.txt",
+            "/meta-replace-src/source.txt",
+            replace_metadata,
+        )
+        .await
+        .expect("copy_object should succeed");
+        assert_eq!(resp.status(), 200);
+
+        // Verify destination has REPLACE metadata (not source metadata).
+        let dst = storage
+            .get_object("meta-replace-dst", "dest.txt")
+            .await
+            .expect("copied object should exist");
+        assert_eq!(
+            dst.object.metadata.get("Color").map(|s| s.as_str()),
+            Some("Blue"),
+            "REPLACE mode should use new metadata"
+        );
+        // "Project" was in source metadata but not in REPLACE — should NOT be present.
+        assert_eq!(
+            dst.object.metadata.get("Project").map(|s| s.as_str()),
+            None,
+            "REPLACE mode should not preserve source metadata not in the replace set"
+        );
+
+        // Source object's metadata must be unchanged.
+        let src = storage
+            .get_object("meta-replace-src", "source.txt")
+            .await
+            .expect("source object should exist");
+        assert_eq!(
+            src.object.metadata.get("Color").map(|s| s.as_str()),
+            Some("Red"),
+            "REPLACE mode must not modify source object metadata"
+        );
+        assert_eq!(
+            src.object.metadata.get("Project").map(|s| s.as_str()),
+            Some("Alpha"),
+            "REPLACE mode must not modify source object metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_copy_object_with_metadata_replace_overrides_all() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("meta-full-replace-src").await.unwrap();
+        storage.create_bucket("meta-full-replace-dst").await.unwrap();
+
+        // PUT source with Color=Red.
+        let mut src_metadata = HashMap::new();
+        src_metadata.insert("Color".into(), "Red".into());
+
+        let body = Bytes::from("full replace test");
+        handle_put_object(
+            &storage,
+            "meta-full-replace-src",
+            "source.txt",
+            "text/plain",
+            src_metadata,
+            body.clone(),
+        )
+        .await
+        .expect("put_object");
+
+        // COPY with REPLACE: completely replace metadata (even with empty set).
+        let resp = handle_copy_object(
+            &storage,
+            "meta-full-replace-dst",
+            "dest.txt",
+            "/meta-full-replace-src/source.txt",
+            HashMap::new(), // empty map = COPY mode (not replace)
+        )
+        .await
+        .expect("copy_object should succeed");
+        assert_eq!(resp.status(), 200);
+
+        // With empty metadata, it's COPY mode — source metadata preserved.
+        let dst = storage
+            .get_object("meta-full-replace-dst", "dest.txt")
+            .await
+            .expect("copied object should exist");
+        assert_eq!(
+            dst.object.metadata.get("Color").map(|s| s.as_str()),
+            Some("Red"),
+            "Empty metadata map means COPY mode — source metadata preserved"
+        );
     }
 }

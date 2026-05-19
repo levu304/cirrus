@@ -12,7 +12,7 @@
 //   AP-P6: CopyObject does NOT increment total_bytes.
 //          Bytes::clone() is O(1) Arc refcount bump.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -208,6 +208,10 @@ pub trait Storage: Send + Sync + Clone + 'static {
 
     /// Copy an object from one location to another.
     ///
+    /// If `metadata` is non-empty (REPLACE mode), the provided metadata
+    /// replaces the source object's metadata.  An empty map means COPY
+    /// mode — the source metadata is preserved.
+    ///
     /// **Anti-Pattern AP-P6:** Bytes::clone() is O(1) — do NOT increment
     /// `total_bytes` here.
     async fn copy_object(
@@ -216,6 +220,7 @@ pub trait Storage: Send + Sync + Clone + 'static {
         src_key: &str,
         dst_bucket: &str,
         dst_key: &str,
+        metadata: &HashMap<String, String>,
     ) -> Result<S3Object, S3Error>;
 
     /// List objects in a bucket (ListObjectsV2) with prefix, delimiter,
@@ -470,6 +475,7 @@ impl Storage for DefaultStorage {
         src_key: &str,
         dst_bucket: &str,
         dst_key: &str,
+        metadata: &HashMap<String, String>,
     ) -> Result<S3Object, S3Error> {
         // Scope the source-bucket borrow so we drop the Ref before
         // acquiring the destination-bucket Ref (they may be the same bucket).
@@ -484,6 +490,10 @@ impl Storage for DefaultStorage {
                 .ok_or(S3Error::NoSuchKey)?;
             let mut obj = src_obj.clone();
             obj.last_modified = Utc::now();
+            // REPLACE mode: use the provided metadata instead of source metadata.
+            if !metadata.is_empty() {
+                obj.metadata = metadata.clone();
+            }
             obj
         }; // src_obj and src_bkt dropped here
 
@@ -1117,7 +1127,7 @@ mod tests {
             .await
             .expect("put_object");
         storage
-            .copy_object("src", "source.txt", "dst", "dest.txt")
+            .copy_object("src", "source.txt", "dst", "dest.txt", &HashMap::new())
             .await
             .expect("copy_object should succeed");
         let result = storage
@@ -1137,7 +1147,7 @@ mod tests {
             .await
             .expect("put_object");
         storage
-            .copy_object("b", "original.txt", "b", "copy.txt")
+            .copy_object("b", "original.txt", "b", "copy.txt", &HashMap::new())
             .await
             .expect("copy_object same bucket");
         let orig = storage.get_object("b", "original.txt").await.unwrap();
@@ -1591,7 +1601,7 @@ mod tests {
         let after_put = storage.total_bytes.load(Ordering::Relaxed);
 
         storage
-            .copy_object("src", "src-key", "dst", "dst-key")
+            .copy_object("src", "src-key", "dst", "dst-key", &HashMap::new())
             .await
             .expect("copy_object");
         let after_copy = storage.total_bytes.load(Ordering::Relaxed);

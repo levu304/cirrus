@@ -173,7 +173,40 @@ async fn dispatch<S: Storage>(
             .and_then(|v| v.to_str().ok())
         {
             validate_copy_source(copy_source)?;
-            return handlers::handle_copy_object(storage, bucket, key, copy_source).await;
+
+            // x-amz-metadata-directive: "REPLACE" or "COPY" (default).
+            let directive = headers
+                .get("x-amz-metadata-directive")
+                .and_then(|v| v.to_str().ok());
+            let is_replace = directive
+                .map(|v| v.eq_ignore_ascii_case("REPLACE"))
+                .unwrap_or(false);
+
+            // Extract x-amz-meta-* headers only when REPLACE is requested.
+            let metadata: HashMap<String, String> = if is_replace {
+                headers
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        let name_str = name.as_str().to_lowercase();
+                        if let Some(key) = name_str.strip_prefix("x-amz-meta-") {
+                            value.to_str().ok().map(|v| (key.to_string(), v.to_string()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                HashMap::new()
+            };
+
+            return handlers::handle_copy_object(
+                storage,
+                bucket,
+                key,
+                copy_source,
+                metadata,
+            )
+            .await;
         }
     }
 
