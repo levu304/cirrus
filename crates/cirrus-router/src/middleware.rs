@@ -53,10 +53,28 @@ pub async fn incomplete_body_detection(
     next: Next,
 ) -> Result<Response, Response> {
     // Read Content-Length from request headers, if present.
-    let content_length = request
-        .headers()
-        .get(http::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+    let content_length = match request.headers().get(http::header::CONTENT_LENGTH) {
+        None => None,
+        Some(v) => match v.to_str() {
+            Err(_) => {
+                // Non-UTF8 header value — rare edge case, treat like no
+                // Content-Length (chunked encoding), pass through.
+                None
+            }
+            Ok(s) => match s.parse::<u64>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    // Non-numeric or overflow Content-Length — the request is
+                    // malformed.  Return 400 Bad Request.
+                    return Ok(aws_error_response(AwsError::new(
+                        AwsErrorKind::MissingRequestHeader {
+                            header_name: "Content-Length".to_string(),
+                        },
+                    )));
+                }
+            },
+        },
+    };
 
     // If no Content-Length header (e.g. chunked encoding), pass through
     // without attempting a body-length comparison.
