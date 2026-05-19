@@ -418,7 +418,7 @@ async fn body_to_bytes(body: Body) -> Result<Bytes, AwsError> {
 /// Returns `InvalidArgument` (HTTP 400) when the value contains a URL
 /// scheme (`://`), lacks a `/` separator between bucket and key, or has
 /// an empty bucket name.
-fn validate_copy_source(copy_source: &str) -> Result<(&str, &str), AwsError> {
+pub(crate) fn validate_copy_source(copy_source: &str) -> Result<(&str, &str), AwsError> {
     // Reject URL schemes (SSRF protection)
     if copy_source.contains("://") {
         return Err(AwsError::new(AwsErrorKind::InvalidArgument {
@@ -954,14 +954,14 @@ mod tests {
         let svc = test_service();
         let req = test_request("GET", "/my-bucket/my-key", None, vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_get_object", 501).await;
+        assert_handler_called(&svc, req, "handle_get_object", 404).await;
     }
 
     #[tokio::test]
     async fn test_dispatch_head_object() {
         let svc = test_service();
         let req = test_request("HEAD", "/my-bucket/my-key", None, vec![]);
-        assert_handler_called(&svc, req, "handle_head_object", 501).await;
+        assert_handler_called(&svc, req, "handle_head_object", 404).await;
     }
 
     #[tokio::test]
@@ -969,14 +969,14 @@ mod tests {
         let svc = test_service();
         let req = test_request("PUT", "/my-bucket/my-key", None, vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_put_object", 501).await;
+        assert_handler_called(&svc, req, "handle_put_object", 404).await;
     }
 
     #[tokio::test]
     async fn test_dispatch_delete_object() {
         let svc = test_service();
         let req = test_request("DELETE", "/my-bucket/my-key", None, vec![]);
-        assert_handler_called(&svc, req, "handle_delete_object", 501).await;
+        assert_handler_called(&svc, req, "handle_delete_object", 404).await;
     }
 
     #[tokio::test]
@@ -989,7 +989,7 @@ mod tests {
             vec![("x-amz-copy-source", "/source-bucket/source-key")],
         );
         // Source bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_copy_object", 501).await;
+        assert_handler_called(&svc, req, "handle_copy_object", 404).await;
     }
 
     #[tokio::test]
@@ -1134,7 +1134,8 @@ mod tests {
             None,
             vec![("x-amz-copy-source", "/src-bucket/src-key")],
         );
-        assert_handler_called(&svc, req, "handle_copy_object", 501).await;
+        // Source bucket does not exist → 404 NoSuchBucket.
+        assert_handler_called(&svc, req, "handle_copy_object", 404).await;
     }
 
     #[tokio::test]
@@ -1164,7 +1165,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_put_object", 501).await;
+        assert_handler_called(&svc, req, "handle_put_object", 404).await;
     }
 
     #[tokio::test]
@@ -1179,7 +1180,8 @@ mod tests {
             Some("partNumber=abc&uploadId=uid"),
             vec![],
         );
-        assert_handler_called(&svc, req, "handle_put_object", 501).await;
+        // Bucket does not exist → 404 NoSuchBucket.
+        assert_handler_called(&svc, req, "handle_put_object", 404).await;
     }
 
     #[tokio::test]
@@ -1299,7 +1301,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("GET", "/s3/bucket/key", None, vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_get_object", 501).await;
+        assert_handler_called(&svc, req, "handle_get_object", 404).await;
     }
 
     #[tokio::test]

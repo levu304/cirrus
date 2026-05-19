@@ -13,10 +13,12 @@ use cirrus_protocol::error::{AwsError, AwsErrorKind};
 use cirrus_protocol::types::{
     ListAllMyBucketsResult, Buckets, Owner,
     CreateBucketOutput, LocationConstraint,
+    S3Object, CopyObjectResult,
 };
-use cirrus_protocol::xml::serialize;
+use cirrus_protocol::xml::{serialize, format_etag, format_http_date};
 use crate::storage::{Storage, S3Error};
-use crate::service::s3_error_to_aws;
+use crate::service::{s3_error_to_aws, validate_copy_source};
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Bucket-level handlers (Phase 5b)
@@ -147,50 +149,161 @@ pub async fn handle_delete_objects<S: Storage>(
 
 /// PUT /{bucket}/{key} with x-amz-copy-source header — copy an object.
 pub async fn handle_copy_object<S: Storage>(
-    _storage: &S,
-    _dst_bucket: &str,
-    _dst_key: &str,
-    _copy_source: &str,
+    storage: &S,
+    dst_bucket: &str,
+    dst_key: &str,
+    copy_source: &str,
 ) -> Result<Response<Body>, AwsError> {
-    Err(AwsError::new(AwsErrorKind::NotImplemented))
+    let (src_bucket, src_key) = validate_copy_source(copy_source)?;
+
+    storage
+        .copy_object(src_bucket, src_key, dst_bucket, dst_key)
+        .await
+        .map_err(|e| s3_error_to_aws(e, src_bucket, src_key))?;
+
+    // Retrieve the copied object's metadata to populate CopyObjectResult.
+    let head_result = storage
+        .head_object(dst_bucket, dst_key)
+        .await
+        .map_err(|e| s3_error_to_aws(e, dst_bucket, dst_key))?;
+
+    let result = CopyObjectResult {
+        etag: head_result.object.etag,
+        last_modified: head_result.object.last_modified,
+    };
+
+    let xml = serialize(&result, "CopyObjectResult")?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    Response::builder()
+        .status(200)
+        .header("Content-Type", "application/xml")
+        .header("x-amz-request-id", &request_id)
+        .header("x-amz-id-2", "cirrus-v0.1.0")
+        .body(Body::from(xml))
+        .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
+            details: Some(format!("response build failed: {e}")),
+        }))
 }
 
 /// PUT /{bucket}/{key} — upload an object.
 pub async fn handle_put_object<S: Storage>(
-    _storage: &S,
-    _bucket: &str,
-    _key: &str,
-    _content_type: &str,
-    _body: Bytes,
+    storage: &S,
+    bucket: &str,
+    key: &str,
+    content_type: &str,
+    body: Bytes,
 ) -> Result<Response<Body>, AwsError> {
-    Err(AwsError::new(AwsErrorKind::NotImplemented))
+    let content_type = if content_type.is_empty() {
+        S3Object::DEFAULT_CONTENT_TYPE
+    } else {
+        content_type
+    };
+
+    let etag = format_etag(&body);
+    let object = S3Object {
+        data: body,
+        etag: etag.clone(),
+        content_type: content_type.to_string(),
+        last_modified: chrono::Utc::now(),
+        metadata: HashMap::new(),
+    };
+
+    storage.put_object(bucket, key, object).await.map_err(|e| {
+        s3_error_to_aws(e, bucket, key)
+    })?;
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    Response::builder()
+        .status(200)
+        .header("ETag", &etag)
+        .header("x-amz-server-side-encryption", "AES256")
+        .header("x-amz-request-id", &request_id)
+        .header("x-amz-id-2", "cirrus-v0.1.0")
+        .body(Body::empty())
+        .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
+            details: Some(format!("response build failed: {e}")),
+        }))
 }
 
 /// GET /{bucket}/{key} — retrieve an object.
 pub async fn handle_get_object<S: Storage>(
-    _storage: &S,
-    _bucket: &str,
-    _key: &str,
+    storage: &S,
+    bucket: &str,
+    key: &str,
 ) -> Result<Response<Body>, AwsError> {
-    Err(AwsError::new(AwsErrorKind::NotImplemented))
+    let result = storage.get_object(bucket, key).await.map_err(|e| {
+        s3_error_to_aws(e, bucket, key)
+    })?;
+
+    let object = result.object;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    Response::builder()
+        .status(200)
+        .header("Content-Type", &object.content_type)
+        .header("Content-Length", object.content_length().to_string())
+        .header("ETag", &object.etag)
+        .header("Last-Modified", format_http_date(object.last_modified))
+        .header("Accept-Ranges", "bytes")
+        .header("x-amz-request-id", &request_id)
+        .header("x-amz-id-2", "cirrus-v0.1.0")
+        .body(Body::from(object.data))
+        .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
+            details: Some(format!("response build failed: {e}")),
+        }))
 }
 
 /// HEAD /{bucket}/{key} — return object metadata (headers only, no body).
 pub async fn handle_head_object<S: Storage>(
-    _storage: &S,
-    _bucket: &str,
-    _key: &str,
+    storage: &S,
+    bucket: &str,
+    key: &str,
 ) -> Result<Response<Body>, AwsError> {
-    Err(AwsError::new(AwsErrorKind::NotImplemented))
+    let result = storage.head_object(bucket, key).await.map_err(|e| {
+        s3_error_to_aws(e, bucket, key)
+    })?;
+
+    let object = result.object;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    Response::builder()
+        .status(200)
+        .header("Content-Type", &object.content_type)
+        .header("Content-Length", object.content_length().to_string())
+        .header("ETag", &object.etag)
+        .header("Last-Modified", format_http_date(object.last_modified))
+        .header("Accept-Ranges", "bytes")
+        .header("x-amz-request-id", &request_id)
+        .header("x-amz-id-2", "cirrus-v0.1.0")
+        .body(Body::empty())
+        .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
+            details: Some(format!("response build failed: {e}")),
+        }))
 }
 
 /// DELETE /{bucket}/{key} — delete an object.
 pub async fn handle_delete_object<S: Storage>(
-    _storage: &S,
-    _bucket: &str,
-    _key: &str,
+    storage: &S,
+    bucket: &str,
+    key: &str,
 ) -> Result<Response<Body>, AwsError> {
-    Err(AwsError::new(AwsErrorKind::NotImplemented))
+    match storage.delete_object(bucket, key).await {
+        Ok(()) => {}
+        Err(S3Error::NoSuchKey) => {
+            // Idempotent delete: missing key → 204 No Content (not an error).
+        }
+        Err(e) => {
+            return Err(s3_error_to_aws(e, bucket, key));
+        }
+    }
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    Response::builder()
+        .status(204)
+        .header("x-amz-request-id", &request_id)
+        .header("x-amz-id-2", "cirrus-v0.1.0")
+        .body(Body::empty())
+        .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
+            details: Some(format!("response build failed: {e}")),
+        }))
 }
 
 // ---------------------------------------------------------------------------
@@ -392,5 +505,384 @@ mod tests {
         assert!(body.contains("<LocationConstraint"));
         assert!(body.contains("xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\""));
         assert!(body.contains("us-east-1"));
+    }
+
+    // -- handle_put_object tests -----------------------------------------
+
+    #[tokio::test]
+    async fn test_put_object_stores_and_returns_correct_etag() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("put-test").await.unwrap();
+
+        let body = Bytes::from("hello world");
+        let resp = handle_put_object(&storage, "put-test", "hello.txt", "text/plain", body.clone())
+            .await
+            .expect("put_object should succeed");
+        assert_eq!(resp.status(), 200);
+
+        let expected_etag = format_etag(&body);
+        assert_eq!(
+            resp.headers().get("ETag").unwrap().to_str().unwrap(),
+            expected_etag
+        );
+        assert_eq!(
+            resp.headers()
+                .get("x-amz-server-side-encryption")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "AES256"
+        );
+        assert!(resp.headers().get("x-amz-request-id").is_some());
+        assert_eq!(
+            resp.headers().get("x-amz-id-2").unwrap().to_str().unwrap(),
+            "cirrus-v0.1.0"
+        );
+
+        // Verify the object was actually stored.
+        let result = storage
+            .get_object("put-test", "hello.txt")
+            .await
+            .expect("stored object should be retrievable");
+        assert_eq!(result.object.data, body);
+        assert_eq!(result.object.content_type, "text/plain");
+    }
+
+    #[tokio::test]
+    async fn test_put_object_uses_default_content_type_when_empty() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("put-test-2").await.unwrap();
+
+        let body = Bytes::from("test data");
+        handle_put_object(&storage, "put-test-2", "f", "", body)
+            .await
+            .expect("put_object should succeed");
+
+        let result = storage
+            .get_object("put-test-2", "f")
+            .await
+            .expect("object should exist");
+        assert_eq!(result.object.content_type, S3Object::DEFAULT_CONTENT_TYPE);
+    }
+
+    #[tokio::test]
+    async fn test_put_object_returns_404_no_such_bucket() {
+        let storage = DefaultStorage::new();
+        let err = handle_put_object(
+            &storage,
+            "nonexistent",
+            "key",
+            "text/plain",
+            Bytes::from("data"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status_code(), 404);
+        assert_eq!(err.error_code(), "NoSuchBucket");
+    }
+
+    // -- handle_get_object tests -----------------------------------------
+
+    #[tokio::test]
+    async fn test_get_object_returns_object_with_correct_headers_and_body() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("get-test").await.unwrap();
+
+        let body = Bytes::from("hello world from get");
+        handle_put_object(&storage, "get-test", "file.txt", "application/json", body.clone())
+            .await
+            .expect("put_object");
+
+        let resp = handle_get_object(&storage, "get-test", "file.txt")
+            .await
+            .expect("get_object should succeed");
+        assert_eq!(resp.status(), 200);
+
+        // Extract header values as owned strings before consuming the response.
+        let content_type = resp
+            .headers()
+            .get("Content-Type")
+            .map(|v| v.to_str().unwrap().to_string());
+        let content_length = resp
+            .headers()
+            .get("Content-Length")
+            .map(|v| v.to_str().unwrap().to_string());
+        let etag = resp
+            .headers()
+            .get("ETag")
+            .map(|v| v.to_str().unwrap().to_string());
+        let last_modified = resp.headers().get("Last-Modified").is_some();
+        let accept_ranges = resp
+            .headers()
+            .get("Accept-Ranges")
+            .map(|v| v.to_str().unwrap().to_string());
+
+        let resp_body = body_to_string(resp.into_body()).await;
+
+        assert_eq!(content_type.unwrap(), "application/json");
+        assert_eq!(content_length.unwrap(), "20"); // "hello world from get".len() = 20
+        assert_eq!(etag.unwrap(), format_etag(&body));
+        assert!(last_modified);
+        assert_eq!(accept_ranges.unwrap(), "bytes");
+        assert_eq!(resp_body, "hello world from get");
+    }
+
+    #[tokio::test]
+    async fn test_get_object_returns_404_no_such_key() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("get-test-2").await.unwrap();
+        let err = handle_get_object(&storage, "get-test-2", "does-not-exist")
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), 404);
+        assert_eq!(err.error_code(), "NoSuchKey");
+    }
+
+    #[tokio::test]
+    async fn test_get_object_returns_404_no_such_bucket() {
+        let storage = DefaultStorage::new();
+        let err = handle_get_object(&storage, "no-such-bucket", "key")
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), 404);
+        assert_eq!(err.error_code(), "NoSuchBucket");
+    }
+
+    // -- handle_head_object tests ----------------------------------------
+
+    #[tokio::test]
+    async fn test_head_object_returns_same_headers_as_get_but_empty_body() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("head-test").await.unwrap();
+
+        let body = Bytes::from("head body content");
+        handle_put_object(&storage, "head-test", "head-file.txt", "text/plain", body.clone())
+            .await
+            .expect("put_object");
+
+        let resp = handle_head_object(&storage, "head-test", "head-file.txt")
+            .await
+            .expect("head_object should succeed");
+        assert_eq!(resp.status(), 200);
+
+        // Verify headers match GET semantics.
+        assert_eq!(
+            resp.headers()
+                .get("Content-Type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "text/plain"
+        );
+        let content_length = resp
+            .headers()
+            .get("Content-Length")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(content_length, "17"); // "head body content".len()
+        assert_eq!(
+            resp.headers().get("ETag").unwrap().to_str().unwrap(),
+            format_etag(&body)
+        );
+        assert!(resp.headers().get("Last-Modified").is_some());
+        assert_eq!(
+            resp.headers()
+                .get("Accept-Ranges")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "bytes"
+        );
+
+        // Body must be empty for HEAD.
+        let resp_body = body_to_string(resp.into_body()).await;
+        assert!(resp_body.is_empty(), "HEAD response body should be empty");
+    }
+
+    #[tokio::test]
+    async fn test_head_object_returns_404_no_such_key() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("head-test-2").await.unwrap();
+        let err = handle_head_object(&storage, "head-test-2", "nope")
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), 404);
+        assert_eq!(err.error_code(), "NoSuchKey");
+    }
+
+    // -- handle_delete_object tests --------------------------------------
+
+    #[tokio::test]
+    async fn test_delete_object_returns_204_on_success() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-obj").await.unwrap();
+
+        let body = Bytes::from("delete me");
+        handle_put_object(&storage, "del-obj", "target.txt", "text/plain", body)
+            .await
+            .expect("put_object");
+
+        let resp = handle_delete_object(&storage, "del-obj", "target.txt")
+            .await
+            .expect("delete_object should succeed");
+        assert_eq!(resp.status(), 204);
+
+        // Verify the object is gone.
+        let err = storage
+            .get_object("del-obj", "target.txt")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, S3Error::NoSuchKey));
+    }
+
+    #[tokio::test]
+    async fn test_delete_object_is_idempotent_for_missing_key() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-obj-idem").await.unwrap();
+
+        // Delete a key that never existed — must return 204, not an error.
+        let resp = handle_delete_object(&storage, "del-obj-idem", "never-existed")
+            .await
+            .expect("delete_object of missing key should succeed (idempotent)");
+        assert_eq!(resp.status(), 204);
+    }
+
+    #[tokio::test]
+    async fn test_delete_object_twice_is_idempotent() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-obj-twice").await.unwrap();
+
+        let body = Bytes::from("data");
+        handle_put_object(&storage, "del-obj-twice", "k", "text/plain", body)
+            .await
+            .expect("put_object");
+
+        // First delete.
+        handle_delete_object(&storage, "del-obj-twice", "k")
+            .await
+            .expect("first delete");
+        // Second delete — must still be 204.
+        let resp = handle_delete_object(&storage, "del-obj-twice", "k")
+            .await
+            .expect("second delete should also succeed (idempotent)");
+        assert_eq!(resp.status(), 204);
+    }
+
+    #[tokio::test]
+    async fn test_delete_object_returns_404_no_such_bucket() {
+        let storage = DefaultStorage::new();
+        let err = handle_delete_object(&storage, "no-such-del-bucket", "key")
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), 404);
+        assert_eq!(err.error_code(), "NoSuchBucket");
+    }
+
+    // -- handle_copy_object tests ----------------------------------------
+
+    #[tokio::test]
+    async fn test_copy_object_returns_copy_object_result_xml() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("copy-src").await.unwrap();
+        storage.create_bucket("copy-dst").await.unwrap();
+
+        let body = Bytes::from("copy this content");
+        handle_put_object(&storage, "copy-src", "source.txt", "text/plain", body.clone())
+            .await
+            .expect("put_object");
+
+        let resp = handle_copy_object(&storage, "copy-dst", "dest.txt", "/copy-src/source.txt")
+            .await
+            .expect("copy_object should succeed");
+        assert_eq!(resp.status(), 200);
+
+        assert_eq!(
+            resp.headers()
+                .get("Content-Type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "application/xml"
+        );
+
+        let resp_body = body_to_string(resp.into_body()).await;
+
+        // Verify CopyObjectResult XML structure.
+        assert!(resp_body.contains("<CopyObjectResult"));
+        assert!(resp_body.contains("xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\""));
+        assert!(resp_body.contains("<ETag>"));
+        assert!(resp_body.contains("<LastModified>"));
+        // Must have the correct ETag value.
+        let expected_etag = format_etag(&body);
+        assert!(
+            resp_body.contains(&format!("<ETag>{}</ETag>", expected_etag)),
+            "expected ETag {} in body: {}",
+            expected_etag,
+            resp_body
+        );
+
+        // Verify the destination actually has the copied data.
+        let dst = storage
+            .get_object("copy-dst", "dest.txt")
+            .await
+            .expect("copied object should exist");
+        assert_eq!(dst.object.data, body);
+    }
+
+    #[tokio::test]
+    async fn test_copy_object_returns_404_no_such_source_bucket() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("copy-dst-404").await.unwrap();
+
+        let err = handle_copy_object(
+            &storage,
+            "copy-dst-404",
+            "dest.txt",
+            "/no-such-src/source.txt",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status_code(), 404);
+        assert_eq!(err.error_code(), "NoSuchBucket");
+    }
+
+    #[tokio::test]
+    async fn test_copy_object_rejects_invalid_copy_source() {
+        let storage = DefaultStorage::new();
+
+        // SSRF attempt via URL scheme.
+        let err = handle_copy_object(
+            &storage,
+            "dst",
+            "key",
+            "http://evil.com/steal",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status_code(), 400);
+        assert_eq!(err.error_code(), "InvalidArgument");
+    }
+
+    #[tokio::test]
+    async fn test_copy_object_same_bucket() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("b").await.unwrap();
+
+        let body = Bytes::from("same bucket copy");
+        handle_put_object(&storage, "b", "original.txt", "text/plain", body.clone())
+            .await
+            .expect("put_object");
+
+        let resp = handle_copy_object(&storage, "b", "copy.txt", "/b/original.txt")
+            .await
+            .expect("copy_object same bucket");
+        assert_eq!(resp.status(), 200);
+
+        // Both objects should exist and have the same content.
+        let orig = storage.get_object("b", "original.txt").await.unwrap();
+        let copy = storage.get_object("b", "copy.txt").await.unwrap();
+        assert_eq!(orig.object.data, copy.object.data);
     }
 }
