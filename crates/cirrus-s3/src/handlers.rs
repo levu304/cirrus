@@ -470,8 +470,11 @@ pub async fn handle_create_multipart_upload<S: Storage>(
     };
 
     let xml = serialize(&result, "InitiateMultipartUploadResult")?;
+    let request_id = uuid::Uuid::new_v4().to_string();
     Response::builder()
         .status(200)
+        .header("x-amz-request-id", &request_id)
+        .header("x-amz-id-2", S3_ID_2)
         .body(Body::from(xml))
         .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
             details: Some(format!("response build failed: {e}")),
@@ -498,9 +501,12 @@ pub async fn handle_upload_part<S: Storage>(
         s3_error_to_aws(e, bucket, key)
     })?;
 
+    let request_id = uuid::Uuid::new_v4().to_string();
     Response::builder()
         .status(200)
         .header("ETag", &etag)
+        .header("x-amz-request-id", &request_id)
+        .header("x-amz-id-2", S3_ID_2)
         .body(Body::empty())
         .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
             details: Some(format!("response build failed: {e}")),
@@ -515,6 +521,12 @@ pub async fn handle_complete_multipart_upload<S: Storage>(
     upload_id: &str,
     body: Bytes,
 ) -> Result<Response<Body>, AwsError> {
+    if body.len() > 64 * 1024 {
+        return Err(AwsError::new(AwsErrorKind::EntityTooLarge {
+            entity: "CompleteMultipartUpload body".into(),
+        }));
+    }
+
     let body_str = std::str::from_utf8(&body).map_err(|_| {
         AwsError::new(AwsErrorKind::MissingRequestBody)
     })?;
@@ -536,8 +548,11 @@ pub async fn handle_complete_multipart_upload<S: Storage>(
     };
 
     let xml = serialize(&result, "CompleteMultipartUploadResult")?;
+    let request_id = uuid::Uuid::new_v4().to_string();
     Response::builder()
         .status(200)
+        .header("x-amz-request-id", &request_id)
+        .header("x-amz-id-2", S3_ID_2)
         .body(Body::from(xml))
         .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
             details: Some(format!("response build failed: {e}")),
@@ -555,8 +570,11 @@ pub async fn handle_abort_multipart_upload<S: Storage>(
         s3_error_to_aws(e, bucket, key)
     })?;
 
+    let request_id = uuid::Uuid::new_v4().to_string();
     Response::builder()
         .status(204)
+        .header("x-amz-request-id", &request_id)
+        .header("x-amz-id-2", S3_ID_2)
         .body(Body::empty())
         .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
             details: Some(format!("response build failed: {e}")),
@@ -617,8 +635,11 @@ pub async fn handle_list_parts<S: Storage>(
     };
 
     let xml = serialize(&result, "ListPartsResult")?;
+    let request_id = uuid::Uuid::new_v4().to_string();
     Response::builder()
         .status(200)
+        .header("x-amz-request-id", &request_id)
+        .header("x-amz-id-2", S3_ID_2)
         .body(Body::from(xml))
         .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
             details: Some(format!("response build failed: {e}")),
