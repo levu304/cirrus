@@ -5,10 +5,8 @@ use crate::error::AwsError;
 /// XML responses with the required xmlns namespace on the root element.
 use crate::types::to_xml_string;
 
-use std::fmt;
 use chrono::{DateTime, Utc};
 use md5::{Md5, Digest};
-use base64::encode;
 
 /// The AWS S3 XML namespace URI required on every response root element.
 ///

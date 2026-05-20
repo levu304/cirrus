@@ -10,8 +10,7 @@
 use crate::error::{AwsError, AwsErrorKind};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use quick_xml::se;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -231,6 +230,7 @@ pub fn to_xml_string<T: serde::Serialize>(value: &T) -> Result<String, AwsError>
 ///
 /// Ensures only valid storage class values can be used, preventing
 /// invalid values like 'INVALID_CLASS' from being set.
+#[allow(non_camel_case_types, clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum StorageClass {
@@ -514,7 +514,7 @@ where
     D: serde::Deserializer<'de>,
 {
     let value = u32::deserialize(deserializer)?;
-    if value < 1 || value > 10000 {
+    if !(1..=10000).contains(&value) {
         return Err(serde::de::Error::custom(format!(
             "PartNumber must be between 1 and 10000, got {}",
             value

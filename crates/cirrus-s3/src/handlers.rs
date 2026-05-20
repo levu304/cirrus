@@ -15,6 +15,8 @@ use cirrus_protocol::types::{
     CreateBucketOutput, LocationConstraint,
     S3Object, CopyObjectResult,
     DeleteRequest, DeleteResult, DeletedObject, DeleteError,
+    InitiateMultipartUploadResult, CompleteMultipartUploadRequest,
+    CompleteMultipartUploadResult, ListPartsResult, StorageClass,
 };
 use cirrus_protocol::xml::{serialize, format_etag, format_http_date};
 use crate::storage::{Storage, S3Error};
@@ -453,55 +455,195 @@ pub async fn handle_delete_object<S: Storage>(
 
 /// POST /{bucket}/{key}?uploads — initiate a multipart upload.
 pub async fn handle_create_multipart_upload<S: Storage>(
-    _storage: &S,
-    _bucket: &str,
-    _key: &str,
+    storage: &S,
+    bucket: &str,
+    key: &str,
 ) -> Result<Response<Body>, AwsError> {
-    Err(AwsError::new(AwsErrorKind::NotImplemented))
+    let upload_id = storage.create_multipart_upload(bucket, key).await.map_err(|e| {
+        s3_error_to_aws(e, bucket, key)
+    })?;
+
+    let result = InitiateMultipartUploadResult {
+        bucket: bucket.to_string(),
+        key: key.to_string(),
+        upload_id,
+    };
+
+    let xml = serialize(&result, "InitiateMultipartUploadResult")?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    Response::builder()
+        .status(200)
+        .header("x-amz-request-id", &request_id)
+        .header("x-amz-id-2", S3_ID_2)
+        .body(Body::from(xml))
+        .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
+            details: Some(format!("response build failed: {e}")),
+        }))
 }
 
 /// PUT /{bucket}/{key}?partNumber=N&uploadId=ID — upload a part.
 pub async fn handle_upload_part<S: Storage>(
-    _storage: &S,
-    _bucket: &str,
-    _key: &str,
-    _part_number: u32,
-    _upload_id: &str,
-    _body: Bytes,
+    storage: &S,
+    bucket: &str,
+    key: &str,
+    part_number: u32,
+    upload_id: &str,
+    body: Bytes,
 ) -> Result<Response<Body>, AwsError> {
-    Err(AwsError::new(AwsErrorKind::NotImplemented))
+    // PartNumber must be between 1 and 10000 (S3 spec).
+    if part_number < 1 || part_number > 10000 {
+        return Err(AwsError::new(AwsErrorKind::InvalidPartNumber {
+            part_number,
+        }));
+    }
+
+    let etag = storage.upload_part(bucket, key, upload_id, part_number, body).await.map_err(|e| {
+        s3_error_to_aws(e, bucket, key)
+    })?;
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    Response::builder()
+        .status(200)
+        .header("ETag", &etag)
+        .header("x-amz-request-id", &request_id)
+        .header("x-amz-id-2", S3_ID_2)
+        .body(Body::empty())
+        .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
+            details: Some(format!("response build failed: {e}")),
+        }))
 }
 
 /// POST /{bucket}/{key}?uploadId=ID — complete a multipart upload.
 pub async fn handle_complete_multipart_upload<S: Storage>(
-    _storage: &S,
-    _bucket: &str,
-    _key: &str,
-    _upload_id: &str,
-    _body: Bytes,
+    storage: &S,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
+    body: Bytes,
 ) -> Result<Response<Body>, AwsError> {
-    Err(AwsError::new(AwsErrorKind::NotImplemented))
+    if body.len() > 64 * 1024 {
+        return Err(AwsError::new(AwsErrorKind::EntityTooLarge {
+            entity: "CompleteMultipartUpload body".into(),
+        }));
+    }
+
+    let body_str = std::str::from_utf8(&body).map_err(|_| {
+        AwsError::new(AwsErrorKind::MissingRequestBody)
+    })?;
+    let complete_req: CompleteMultipartUploadRequest =
+        quick_xml::de::from_str(body_str).map_err(|_| {
+            AwsError::new(AwsErrorKind::MissingRequestBody)
+        })?;
+
+    let etag = storage
+        .complete_multipart_upload(bucket, key, upload_id, &complete_req.parts)
+        .await
+        .map_err(|e| s3_error_to_aws(e, bucket, key))?;
+
+    let result = CompleteMultipartUploadResult {
+        location: format!("http://localhost/{}/{}", bucket, key),
+        bucket: bucket.to_string(),
+        key: key.to_string(),
+        etag,
+    };
+
+    let xml = serialize(&result, "CompleteMultipartUploadResult")?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    Response::builder()
+        .status(200)
+        .header("x-amz-request-id", &request_id)
+        .header("x-amz-id-2", S3_ID_2)
+        .body(Body::from(xml))
+        .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
+            details: Some(format!("response build failed: {e}")),
+        }))
 }
 
 /// DELETE /{bucket}/{key}?uploadId=ID — abort a multipart upload.
 pub async fn handle_abort_multipart_upload<S: Storage>(
-    _storage: &S,
-    _bucket: &str,
-    _key: &str,
-    _upload_id: &str,
+    storage: &S,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
 ) -> Result<Response<Body>, AwsError> {
-    Err(AwsError::new(AwsErrorKind::NotImplemented))
+    storage.abort_multipart_upload(bucket, key, upload_id).await.map_err(|e| {
+        s3_error_to_aws(e, bucket, key)
+    })?;
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    Response::builder()
+        .status(204)
+        .header("x-amz-request-id", &request_id)
+        .header("x-amz-id-2", S3_ID_2)
+        .body(Body::empty())
+        .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
+            details: Some(format!("response build failed: {e}")),
+        }))
 }
 
 /// GET /{bucket}/{key}?uploadId=ID — list parts of an in-progress upload.
 pub async fn handle_list_parts<S: Storage>(
-    _storage: &S,
-    _bucket: &str,
-    _key: &str,
-    _upload_id: &str,
-    _query: &str,
+    storage: &S,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
+    query: &str,
 ) -> Result<Response<Body>, AwsError> {
-    Err(AwsError::new(AwsErrorKind::NotImplemented))
+    // Parse query parameters manually (serde_urlencoded is not in our deps).
+    let params: HashMap<String, String> = query
+        .split('&')
+        .filter_map(|pair| {
+            let mut parts = pair.splitn(2, '=');
+            Some((parts.next()?.to_string(), parts.next().unwrap_or("").to_string()))
+        })
+        .collect();
+
+    let max_parts: u32 = params
+        .get("max-parts")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
+    let part_number_marker: u32 = params
+        .get("part-number-marker")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    let parts_list = storage
+        .list_parts(bucket, key, upload_id, max_parts, part_number_marker)
+        .await
+        .map_err(|e| s3_error_to_aws(e, bucket, key))?;
+
+    let owner = Owner {
+        id: "000000000000".to_string(),
+        display_name: "webfile".to_string(),
+    };
+
+    let result = ListPartsResult {
+        bucket: bucket.to_string(),
+        key: key.to_string(),
+        upload_id: upload_id.to_string(),
+        initiator: owner.clone(),
+        owner,
+        max_parts,
+        next_part_number_marker: parts_list.next_part_number_marker,
+        part_number_marker: params
+            .get("part-number-marker")
+            .cloned()
+            .unwrap_or_else(|| "0".to_string()),
+        storage_class: StorageClass::STANDARD,
+        parts: parts_list.parts,
+        is_truncated: parts_list.is_truncated,
+    };
+
+    let xml = serialize(&result, "ListPartsResult")?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    Response::builder()
+        .status(200)
+        .header("x-amz-request-id", &request_id)
+        .header("x-amz-id-2", S3_ID_2)
+        .body(Body::from(xml))
+        .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
+            details: Some(format!("response build failed: {e}")),
+        }))
 }
 
 // ---------------------------------------------------------------------------
