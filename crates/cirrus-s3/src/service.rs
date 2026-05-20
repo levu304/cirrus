@@ -221,17 +221,21 @@ async fn dispatch<S: Storage>(
         if let (Some(pn_str), Some(upload_id)) =
             (query_params.get("partNumber"), query_params.get("uploadId"))
         {
-            if let Ok(part_number) = pn_str.parse::<u32>() {
-                return handlers::handle_upload_part(
-                    storage,
-                    bucket,
-                    key,
-                    part_number,
-                    upload_id,
-                    body,
-                )
-                .await;
-            }
+            let part_number = pn_str.parse::<u32>().map_err(|_| {
+                AwsError::new(AwsErrorKind::InvalidArgument {
+                    argument_name: "partNumber".into(),
+                    value: pn_str.clone(),
+                })
+            })?;
+            return handlers::handle_upload_part(
+                storage,
+                bucket,
+                key,
+                part_number,
+                upload_id,
+                body,
+            )
+            .await;
         }
     }
 
@@ -688,9 +692,15 @@ mod tests {
             if let (Some(pn_str), Some(_upload_id)) =
                 (query_params.get("partNumber"), query_params.get("uploadId"))
             {
-                if pn_str.parse::<u32>().is_ok() {
-                    return Ok("handle_upload_part");
-                }
+                // Must match real dispatch: invalid partNumber returns an error,
+                // it does NOT silently fall through to PutObject.
+                pn_str.parse::<u32>().map_err(|_| {
+                    AwsError::new(AwsErrorKind::InvalidArgument {
+                        argument_name: "partNumber".into(),
+                        value: pn_str.clone(),
+                    })
+                })?;
+                return Ok("handle_upload_part");
             }
         }
 
@@ -1433,10 +1443,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dispatch_put_with_invalid_partnumber_falls_to_put() {
+    async fn test_dispatch_put_with_invalid_partnumber_returns_error() {
         // PUT with invalid (non-numeric) partNumber and valid uploadId should
-        // fall through to regular PutObject (rule 6) because the u32 parse
-        // failure prevents UploadPart (rule 12) from matching.
+        // return InvalidArgument rather than silently falling through to PutObject.
         let svc = test_service();
         let req = test_request(
             "PUT",
@@ -1444,8 +1453,14 @@ mod tests {
             Some("partNumber=abc&uploadId=uid"),
             vec![],
         );
-        // Bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_put_object", 404).await;
+        let resp = svc.handle(req).await;
+        match resp {
+            Err(e) => {
+                assert_eq!(e.status_code(), 400, "expected 400 for InvalidArgument");
+                assert_eq!(e.error_code(), "InvalidArgument");
+            }
+            Ok(r) => panic!("expected InvalidArgument error but got status {}", r.status()),
+        }
     }
 
     #[tokio::test]
