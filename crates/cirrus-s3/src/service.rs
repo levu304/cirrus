@@ -1313,7 +1313,7 @@ mod tests {
         let svc = test_service();
         let req = test_request("POST", "/my-bucket/my-key", Some("uploads"), vec![]);
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_create_multipart_upload", 501).await;
+        assert_handler_called(&svc, req, "handle_create_multipart_upload", 404).await;
     }
 
     #[tokio::test]
@@ -1326,7 +1326,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_upload_part", 501).await;
+        assert_handler_called(&svc, req, "handle_upload_part", 404).await;
     }
 
     #[tokio::test]
@@ -1338,8 +1338,8 @@ mod tests {
             Some("uploadId=test-upload-id"),
             vec![],
         );
-        // Empty body → XML parse error → 500 XmlSerializationError.
-        assert_handler_called(&svc, req, "handle_complete_multipart_upload", 501).await;
+        // Empty body → XML parse error → 400 MissingRequestBody.
+        assert_handler_called(&svc, req, "handle_complete_multipart_upload", 400).await;
     }
 
     #[tokio::test]
@@ -1352,7 +1352,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_abort_multipart_upload", 501).await;
+        assert_handler_called(&svc, req, "handle_abort_multipart_upload", 404).await;
     }
 
     #[tokio::test]
@@ -1365,7 +1365,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_list_parts", 501).await;
+        assert_handler_called(&svc, req, "handle_list_parts", 404).await;
     }
 
     // ------------------------------------------------------------------
@@ -1414,7 +1414,7 @@ mod tests {
             vec![], // No x-amz-copy-source header
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_upload_part", 501).await;
+        assert_handler_called(&svc, req, "handle_upload_part", 404).await;
     }
 
     #[tokio::test]
@@ -1493,7 +1493,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_list_parts", 501).await;
+        assert_handler_called(&svc, req, "handle_list_parts", 404).await;
     }
 
     #[tokio::test]
@@ -1508,7 +1508,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_abort_multipart_upload", 501).await;
+        assert_handler_called(&svc, req, "handle_abort_multipart_upload", 404).await;
     }
 
     #[tokio::test]
@@ -1522,7 +1522,7 @@ mod tests {
             vec![],
         );
         // Bucket does not exist → 404 NoSuchBucket.
-        assert_handler_called(&svc, req, "handle_create_multipart_upload", 501).await;
+        assert_handler_called(&svc, req, "handle_create_multipart_upload", 404).await;
     }
 
     #[tokio::test]
@@ -1535,8 +1535,8 @@ mod tests {
             Some("uploadId=uid-123"),
             vec![],
         );
-        // Empty body → XML parse error → 500 XmlSerializationError.
-        assert_handler_called(&svc, req, "handle_complete_multipart_upload", 501).await;
+        // Empty body → XML parse error → 400 MissingRequestBody.
+        assert_handler_called(&svc, req, "handle_complete_multipart_upload", 400).await;
     }
 
     #[tokio::test]
@@ -1551,7 +1551,7 @@ mod tests {
             Some("uploads&uploadId=test-upload-id"),
             vec![],
         );
-        assert_handler_called(&svc, req, "handle_create_multipart_upload", 501).await;
+        assert_handler_called(&svc, req, "handle_create_multipart_upload", 404).await;
     }
 
     // ------------------------------------------------------------------
