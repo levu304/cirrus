@@ -203,11 +203,14 @@ pub async fn handle_delete_objects<S: Storage>(
                     version_id: obj.version_id.clone(),
                 });
             }
-            Err(e) => {
+            Err(_) => {
+                // Catch-all for unexpected storage errors.
+                // Use a generic client-safe message to avoid leaking internal
+                // details (e.g. MaxCapacityExceeded) per AWS S3 convention.
                 errors.push(DeleteError {
                     key: obj.key.clone(),
                     code: "InternalError".into(),
-                    message: e.to_string(),
+                    message: "We encountered an internal error. Please try again.".into(),
                     version_id: obj.version_id.clone(),
                 });
             }
