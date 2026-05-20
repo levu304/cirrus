@@ -163,6 +163,15 @@ pub async fn handle_delete_objects<S: Storage>(
         })
     })?;
 
+    // S3 spec limits Delete to 1000 keys per request.
+    if delete_req.objects.len() > 1000 {
+        return Err(AwsError::new(AwsErrorKind::InvalidArgument {
+            argument_name: "Delete".into(),
+            value: "The number of keys in a single Delete request must not exceed 1000"
+                .into(),
+        }));
+    }
+
     let mut deleted: Vec<DeletedObject> = Vec::new();
     let mut errors: Vec<DeleteError> = Vec::new();
 
@@ -171,21 +180,27 @@ pub async fn handle_delete_objects<S: Storage>(
             Ok(()) => {
                 deleted.push(DeletedObject {
                     key: obj.key.clone(),
-                    version_id: None,
+                    version_id: obj.version_id.clone(),
                     delete_marker: None,
                     delete_marker_version_id: None,
                 });
             }
             Err(S3Error::NoSuchBucket) => {
-                // Bucket doesn't exist — return 404 immediately, no batch result.
-                return Err(s3_error_to_aws(S3Error::NoSuchBucket, bucket, ""));
+                // Bucket doesn't exist — record per-key error and continue.
+                // Per S3 spec, DeleteObjects always returns a 200 with per-key errors.
+                errors.push(DeleteError {
+                    key: obj.key.clone(),
+                    code: "NoSuchBucket".into(),
+                    message: "The specified bucket does not exist.".into(),
+                    version_id: obj.version_id.clone(),
+                });
             }
             Err(S3Error::NoSuchKey) => {
                 errors.push(DeleteError {
                     key: obj.key.clone(),
                     code: "NoSuchKey".into(),
                     message: "The specified key does not exist.".into(),
-                    version_id: None,
+                    version_id: obj.version_id.clone(),
                 });
             }
             Err(e) => {
@@ -193,7 +208,7 @@ pub async fn handle_delete_objects<S: Storage>(
                     key: obj.key.clone(),
                     code: "InternalError".into(),
                     message: e.to_string(),
-                    version_id: None,
+                    version_id: obj.version_id.clone(),
                 });
             }
         }
@@ -1784,11 +1799,50 @@ mod tests {
         // No bucket created.
 
         let req_body = delete_xml_body(&["key1"], None);
-        let err = handle_delete_objects(&storage, "nonexistent-bucket", req_body)
+        let resp = handle_delete_objects(&storage, "nonexistent-bucket", req_body)
             .await
-            .unwrap_err();
-        assert_eq!(err.status_code(), 404);
-        assert_eq!(err.error_code(), "NoSuchBucket");
+            .expect("should return 200 with per-key errors per S3 spec");
+        assert_eq!(resp.status(), 200);
+
+        let resp_body = body_to_string(resp.into_body()).await;
+        assert!(
+            !resp_body.contains("<Deleted>"),
+            "no Deleted entries expected"
+        );
+        assert_eq!(
+            resp_body.matches("<Error>").count(),
+            1,
+            "expected 1 Error entry"
+        );
+        assert!(resp_body.contains("<Code>NoSuchBucket</Code>"));
+        assert!(resp_body.contains("<Key>key1</Key>"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_all_no_such_bucket_multiple_keys() {
+        let storage = DefaultStorage::new();
+        // No bucket created — all keys get per-key NoSuchBucket errors.
+
+        let req_body = delete_xml_body(&["alpha", "beta", "gamma"], None);
+        let resp = handle_delete_objects(&storage, "missing-bucket", req_body)
+            .await
+            .expect("should return 200 with per-key errors per S3 spec");
+        assert_eq!(resp.status(), 200);
+
+        let resp_body = body_to_string(resp.into_body()).await;
+        assert!(
+            !resp_body.contains("<Deleted>"),
+            "no Deleted entries expected"
+        );
+        assert_eq!(
+            resp_body.matches("<Error>").count(),
+            3,
+            "expected 3 Error entries (one per key)"
+        );
+        assert!(resp_body.contains("<Key>alpha</Key>"));
+        assert!(resp_body.contains("<Key>beta</Key>"));
+        assert!(resp_body.contains("<Key>gamma</Key>"));
+        assert!(resp_body.contains("<Code>NoSuchBucket</Code>"));
     }
 
     #[tokio::test]
@@ -1818,9 +1872,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_objects_with_version_id_is_accepted() {
-        // The DeleteRequest struct accepts version_id even though the
-        // in-memory storage ignores it. Verify the handler doesn't choke.
+    async fn test_delete_objects_with_version_id_is_echoed_in_response() {
+        // Per S3 spec, the VersionId from the request must be echoed back
+        // in the <Deleted> element of the response.
         let storage = DefaultStorage::new();
         storage.create_bucket("del-versioned").await.unwrap();
 
@@ -1835,13 +1889,126 @@ mod tests {
         .await
         .expect("put_object");
 
-        // XML with VersionId element.
         let xml = Bytes::from(
-            "<Delete><Object><Key>v-key</Key><VersionId>null</VersionId></Object></Delete>",
+            "<Delete><Object><Key>v-key</Key><VersionId>abc123</VersionId></Object></Delete>",
         );
         let resp = handle_delete_objects(&storage, "del-versioned", xml)
             .await
             .expect("should succeed with version_id present");
+        assert_eq!(resp.status(), 200);
+
+        let resp_body = body_to_string(resp.into_body()).await;
+        assert!(
+            resp_body.contains("<VersionId>abc123</VersionId>"),
+            "VersionId should be echoed in response: {resp_body}"
+        );
+        assert!(resp_body.contains("<Key>v-key</Key>"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_version_id_echoed_in_nosuchkey_error() {
+        // Per S3 spec, VersionId from the request must be echoed back
+        // in <Error> elements when the key doesn't exist.
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-versioned-error").await.unwrap();
+
+        // Delete a non-existent key with a VersionId — should get a NoSuchKey error
+        // that echoes the VersionId back.
+        let xml = Bytes::from(
+            "<Delete><Object><Key>no-such-key</Key><VersionId>ver-999</VersionId></Object></Delete>",
+        );
+        let resp = handle_delete_objects(&storage, "del-versioned-error", xml)
+            .await
+            .expect("should succeed with per-key error");
+        assert_eq!(resp.status(), 200);
+
+        let resp_body = body_to_string(resp.into_body()).await;
+        assert!(
+            resp_body.contains("<VersionId>ver-999</VersionId>"),
+            "VersionId should be echoed in error response: {resp_body}"
+        );
+        assert!(resp_body.contains("<Code>NoSuchKey</Code>"));
+        assert!(resp_body.contains("<Key>no-such-key</Key>"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_version_id_absent_when_request_has_none() {
+        // When the request has no VersionId, the response should not include
+        // a <VersionId> element (skip_serializing_if handles this).
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-no-version").await.unwrap();
+
+        handle_put_object(
+            &storage,
+            "del-no-version",
+            "plain-key",
+            "text/plain",
+            HashMap::new(),
+            Bytes::from("data"),
+        )
+        .await
+        .expect("put_object");
+
+        let xml = Bytes::from("<Delete><Object><Key>plain-key</Key></Object></Delete>");
+        let resp = handle_delete_objects(&storage, "del-no-version", xml)
+            .await
+            .expect("should succeed");
+        assert_eq!(resp.status(), 200);
+
+        let resp_body = body_to_string(resp.into_body()).await;
+        assert!(
+            !resp_body.contains("<VersionId>"),
+            "VersionId should not appear when request has none: {resp_body}"
+        );
+        assert!(resp_body.contains("<Key>plain-key</Key>"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_over_1000_returns_invalid_argument() {
+        let storage = DefaultStorage::new();
+
+        // 1001 keys — exceeds the 1000-key limit.
+        let keys: Vec<String> = (0..1001).map(|i| format!("k-{}", i)).collect();
+        let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        let body = delete_xml_body(&key_refs, None);
+
+        let err = handle_delete_objects(&storage, "some-bucket", body)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), 400);
+        assert_eq!(err.error_code(), "InvalidArgument");
+        // The XML response should carry the Limit message.
+        let xml = err.to_xml();
+        assert!(xml.contains("must not exceed 1000"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_exactly_1000_succeeds() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-1000").await.unwrap();
+
+        let keys: Vec<String> = (0..1000).map(|i| format!("k-{}", i)).collect();
+        let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        let body = delete_xml_body(&key_refs, None);
+
+        let resp = handle_delete_objects(&storage, "del-1000", body)
+            .await
+            .expect("1000 keys should be allowed");
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_999_succeeds() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-999").await.unwrap();
+
+        let keys: Vec<String> = (0..999).map(|i| format!("k-{}", i)).collect();
+        let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        let body = delete_xml_body(&key_refs, None);
+
+        let resp = handle_delete_objects(&storage, "del-999", body)
+            .await
+            .expect("999 keys should be allowed");
         assert_eq!(resp.status(), 200);
     }
 }
