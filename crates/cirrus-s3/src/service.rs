@@ -1300,8 +1300,8 @@ mod tests {
     async fn test_dispatch_delete_objects() {
         let svc = test_service();
         let req = test_request("POST", "/my-bucket", Some("delete"), vec![]);
-        // Empty body → XML parse error → 500 XmlSerializationError.
-        assert_handler_called(&svc, req, "handle_delete_objects", 501).await;
+        // Empty body → XML parse error → 400 InvalidArgument.
+        assert_handler_called(&svc, req, "handle_delete_objects", 400).await;
     }
 
     // ------------------------------------------------------------------

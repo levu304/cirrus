@@ -14,6 +14,7 @@ use cirrus_protocol::types::{
     ListAllMyBucketsResult, Buckets, Owner,
     CreateBucketOutput, LocationConstraint,
     S3Object, CopyObjectResult,
+    DeleteRequest, DeleteResult, DeletedObject, DeleteError,
 };
 use cirrus_protocol::xml::{serialize, format_etag, format_http_date};
 use crate::storage::{Storage, S3Error};
@@ -135,12 +136,104 @@ pub async fn handle_list_objects_v2<S: Storage>(
 }
 
 /// POST /{bucket}?delete — delete multiple objects.
+///
+/// Parses an S3 Delete XML body and iterates over each object key,
+/// deleting them sequentially (non-transactional per S3 spec).
+/// Failed deletes (e.g. NoSuchKey) are reported as `<Error>` entries
+/// in the response rather than failing the entire request.
+///
+/// When `<Quiet>true</Quiet>`, `<Deleted>` entries are omitted from
+/// the response (only `<Error>` entries are included).
 pub async fn handle_delete_objects<S: Storage>(
-    _storage: &S,
-    _bucket: &str,
-    _body: Bytes,
+    storage: &S,
+    bucket: &str,
+    body: Bytes,
 ) -> Result<Response<Body>, AwsError> {
-    Err(AwsError::new(AwsErrorKind::NotImplemented))
+    // Parse the XML body as a Delete request.
+    let body_str = std::str::from_utf8(&body).map_err(|_| {
+        AwsError::new(AwsErrorKind::InvalidArgument {
+            argument_name: "body".into(),
+            value: "request body is not valid UTF-8".into(),
+        })
+    })?;
+    let delete_req: DeleteRequest = quick_xml::de::from_str(body_str).map_err(|e| {
+        AwsError::new(AwsErrorKind::InvalidArgument {
+            argument_name: "body".into(),
+            value: format!("Malformed XML in Delete request: {e}"),
+        })
+    })?;
+
+    // S3 spec limits Delete to 1000 keys per request.
+    if delete_req.objects.len() > 1000 {
+        return Err(AwsError::new(AwsErrorKind::InvalidArgument {
+            argument_name: "Delete".into(),
+            value: "The number of keys in a single Delete request must not exceed 1000"
+                .into(),
+        }));
+    }
+
+    let mut deleted: Vec<DeletedObject> = Vec::new();
+    let mut errors: Vec<DeleteError> = Vec::new();
+
+    for obj in &delete_req.objects {
+        match storage.delete_object(bucket, &obj.key).await {
+            Ok(()) => {
+                deleted.push(DeletedObject {
+                    key: obj.key.clone(),
+                    version_id: obj.version_id.clone(),
+                    delete_marker: None,
+                    delete_marker_version_id: None,
+                });
+            }
+            Err(S3Error::NoSuchBucket) => {
+                // Bucket doesn't exist — record per-key error and continue.
+                // Per S3 spec, DeleteObjects always returns a 200 with per-key errors.
+                errors.push(DeleteError {
+                    key: obj.key.clone(),
+                    code: "NoSuchBucket".into(),
+                    message: "The specified bucket does not exist.".into(),
+                    version_id: obj.version_id.clone(),
+                });
+            }
+            Err(S3Error::NoSuchKey) => {
+                errors.push(DeleteError {
+                    key: obj.key.clone(),
+                    code: "NoSuchKey".into(),
+                    message: "The specified key does not exist.".into(),
+                    version_id: obj.version_id.clone(),
+                });
+            }
+            Err(_) => {
+                // Catch-all for unexpected storage errors.
+                // Use a generic client-safe message to avoid leaking internal
+                // details (e.g. MaxCapacityExceeded) per AWS S3 convention.
+                errors.push(DeleteError {
+                    key: obj.key.clone(),
+                    code: "InternalError".into(),
+                    message: "We encountered an internal error. Please try again.".into(),
+                    version_id: obj.version_id.clone(),
+                });
+            }
+        }
+    }
+
+    // Build the result, respecting the Quiet flag.
+    let result = DeleteResult {
+        deleted: if delete_req.quiet { Vec::new() } else { deleted },
+        errors,
+    };
+
+    let xml = serialize(&result, "DeleteResult")?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    Response::builder()
+        .status(200)
+        .header("Content-Type", "application/xml")
+        .header("x-amz-request-id", &request_id)
+        .header("x-amz-id-2", S3_ID_2)
+        .body(Body::from(xml))
+        .map_err(|e| AwsError::new(AwsErrorKind::InternalError {
+            details: Some(format!("response build failed: {e}")),
+        }))
 }
 
 /// Opaque value for the x-amz-id-2 response header.
@@ -1441,5 +1534,484 @@ mod tests {
             Some("Red"),
             "Empty metadata map means COPY mode — source metadata preserved"
         );
+    }
+
+    // -- handle_delete_objects tests ------------------------------------
+
+    /// Build a Delete XML body from a list of object keys.
+    fn delete_xml_body(objects: &[&str], quiet: Option<bool>) -> Bytes {
+        let quiet_elem = match quiet {
+            Some(true) => "<Quiet>true</Quiet>",
+            Some(false) => "<Quiet>false</Quiet>",
+            None => "",
+        };
+        let objects_xml: String = objects
+            .iter()
+            .map(|key| format!("<Object><Key>{}</Key></Object>", key))
+            .collect();
+        let xml = format!("<Delete>{}{}</Delete>", quiet_elem, objects_xml);
+        Bytes::from(xml)
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_empty_list_returns_200_with_empty_result() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-empty-list").await.unwrap();
+
+        let body = delete_xml_body(&[], None);
+        let resp = handle_delete_objects(&storage, "del-empty-list", body)
+            .await
+            .expect("should succeed");
+        assert_eq!(resp.status(), 200);
+
+        let resp_body = body_to_string(resp.into_body()).await;
+        assert!(resp_body.contains("<DeleteResult"));
+        assert!(resp_body.contains("xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\""));
+        assert!(!resp_body.contains("<Deleted>"), "no Deleted elements expected");
+        assert!(!resp_body.contains("<Error>"), "no Error elements expected");
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_single_object_success() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-single-obj").await.unwrap();
+
+        let body_data = Bytes::from("data");
+        handle_put_object(
+            &storage,
+            "del-single-obj",
+            "k1",
+            "text/plain",
+            HashMap::new(),
+            body_data,
+        )
+        .await
+        .expect("put_object");
+
+        let req_body = delete_xml_body(&["k1"], None);
+        let resp = handle_delete_objects(&storage, "del-single-obj", req_body)
+            .await
+            .expect("should succeed");
+        assert_eq!(resp.status(), 200);
+
+        // Object is gone from storage.
+        let err = storage
+            .get_object("del-single-obj", "k1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, S3Error::NoSuchKey));
+
+        let resp_body = body_to_string(resp.into_body()).await;
+        assert!(resp_body.contains("<Deleted>"));
+        assert!(resp_body.contains("<Key>k1</Key>"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_multiple_objects_all_succeed() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-multi-all").await.unwrap();
+
+        for key in &["a.txt", "b.txt", "c.txt"] {
+            handle_put_object(
+                &storage,
+                "del-multi-all",
+                key,
+                "text/plain",
+                HashMap::new(),
+                Bytes::from("data"),
+            )
+            .await
+            .expect("put_object");
+        }
+
+        let req_body = delete_xml_body(&["a.txt", "b.txt", "c.txt"], None);
+        let resp = handle_delete_objects(&storage, "del-multi-all", req_body)
+            .await
+            .expect("should succeed");
+        assert_eq!(resp.status(), 200);
+
+        let resp_body = body_to_string(resp.into_body()).await;
+        assert_eq!(resp_body.matches("<Deleted>").count(), 3);
+        assert!(resp_body.contains("<Key>a.txt</Key>"));
+        assert!(resp_body.contains("<Key>b.txt</Key>"));
+        assert!(resp_body.contains("<Key>c.txt</Key>"));
+
+        // All objects gone from storage.
+        for key in &["a.txt", "b.txt", "c.txt"] {
+            let err = storage.get_object("del-multi-all", key).await.unwrap_err();
+            assert!(matches!(err, S3Error::NoSuchKey));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_quiet_mode_suppresses_deleted() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-quiet-mode").await.unwrap();
+
+        handle_put_object(
+            &storage,
+            "del-quiet-mode",
+            "quiet-key",
+            "text/plain",
+            HashMap::new(),
+            Bytes::from("data"),
+        )
+        .await
+        .expect("put_object");
+
+        let req_body = delete_xml_body(&["quiet-key"], Some(true));
+        let resp = handle_delete_objects(&storage, "del-quiet-mode", req_body)
+            .await
+            .expect("should succeed");
+        assert_eq!(resp.status(), 200);
+
+        let resp_body = body_to_string(resp.into_body()).await;
+        assert!(
+            !resp_body.contains("<Deleted>"),
+            "Quiet mode should suppress Deleted entries"
+        );
+        assert!(!resp_body.contains("<Error>"), "No errors expected");
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_non_quiet_mode_includes_deleted() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-nonquiet-mode").await.unwrap();
+
+        handle_put_object(
+            &storage,
+            "del-nonquiet-mode",
+            "visible-key",
+            "text/plain",
+            HashMap::new(),
+            Bytes::from("data"),
+        )
+        .await
+        .expect("put_object");
+
+        let req_body = delete_xml_body(&["visible-key"], Some(false));
+        let resp = handle_delete_objects(&storage, "del-nonquiet-mode", req_body)
+            .await
+            .expect("should succeed");
+        assert_eq!(resp.status(), 200);
+
+        let resp_body = body_to_string(resp.into_body()).await;
+        assert!(
+            resp_body.contains("<Deleted>"),
+            "Non-Quiet mode should include Deleted entries"
+        );
+        assert!(resp_body.contains("<Key>visible-key</Key>"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_quiet_default_is_false() {
+        // When <Quiet> is absent, default is false (Deleted entries shown).
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-quiet-default").await.unwrap();
+
+        handle_put_object(
+            &storage,
+            "del-quiet-default",
+            "default-key",
+            "text/plain",
+            HashMap::new(),
+            Bytes::from("data"),
+        )
+        .await
+        .expect("put_object");
+
+        let req_body = delete_xml_body(&["default-key"], None); // No Quiet element
+        let resp = handle_delete_objects(&storage, "del-quiet-default", req_body)
+            .await
+            .expect("should succeed");
+        assert_eq!(resp.status(), 200);
+
+        let resp_body = body_to_string(resp.into_body()).await;
+        assert!(
+            resp_body.contains("<Deleted>"),
+            "Default Quiet=false should include Deleted entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_partial_failures_mix_success_and_error() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-partial-fail").await.unwrap();
+
+        // Only "exists" is in storage; "missing" is not.
+        handle_put_object(
+            &storage,
+            "del-partial-fail",
+            "exists",
+            "text/plain",
+            HashMap::new(),
+            Bytes::from("data"),
+        )
+        .await
+        .expect("put_object");
+
+        let req_body = delete_xml_body(&["exists", "missing"], None);
+        let resp = handle_delete_objects(&storage, "del-partial-fail", req_body)
+            .await
+            .expect("should succeed");
+        assert_eq!(resp.status(), 200);
+
+        let resp_body = body_to_string(resp.into_body()).await;
+        assert_eq!(
+            resp_body.matches("<Deleted>").count(),
+            1,
+            "expected 1 Deleted entry"
+        );
+        assert_eq!(
+            resp_body.matches("<Error>").count(),
+            1,
+            "expected 1 Error entry"
+        );
+        assert!(resp_body.contains("<Key>exists</Key>"));
+        assert!(resp_body.contains("<Key>missing</Key>"));
+        assert!(resp_body.contains("<Code>NoSuchKey</Code>"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_all_failures_only_error_entries() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-all-fail").await.unwrap();
+
+        let req_body = delete_xml_body(&["nope1", "nope2"], None);
+        let resp = handle_delete_objects(&storage, "del-all-fail", req_body)
+            .await
+            .expect("should succeed");
+        assert_eq!(resp.status(), 200);
+
+        let resp_body = body_to_string(resp.into_body()).await;
+        assert!(
+            !resp_body.contains("<Deleted>"),
+            "no Deleted entries expected"
+        );
+        assert_eq!(
+            resp_body.matches("<Error>").count(),
+            2,
+            "expected 2 Error entries"
+        );
+        assert!(resp_body.contains("<Code>NoSuchKey</Code>"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_returns_404_no_such_bucket() {
+        let storage = DefaultStorage::new();
+        // No bucket created.
+
+        let req_body = delete_xml_body(&["key1"], None);
+        let resp = handle_delete_objects(&storage, "nonexistent-bucket", req_body)
+            .await
+            .expect("should return 200 with per-key errors per S3 spec");
+        assert_eq!(resp.status(), 200);
+
+        let resp_body = body_to_string(resp.into_body()).await;
+        assert!(
+            !resp_body.contains("<Deleted>"),
+            "no Deleted entries expected"
+        );
+        assert_eq!(
+            resp_body.matches("<Error>").count(),
+            1,
+            "expected 1 Error entry"
+        );
+        assert!(resp_body.contains("<Code>NoSuchBucket</Code>"));
+        assert!(resp_body.contains("<Key>key1</Key>"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_all_no_such_bucket_multiple_keys() {
+        let storage = DefaultStorage::new();
+        // No bucket created — all keys get per-key NoSuchBucket errors.
+
+        let req_body = delete_xml_body(&["alpha", "beta", "gamma"], None);
+        let resp = handle_delete_objects(&storage, "missing-bucket", req_body)
+            .await
+            .expect("should return 200 with per-key errors per S3 spec");
+        assert_eq!(resp.status(), 200);
+
+        let resp_body = body_to_string(resp.into_body()).await;
+        assert!(
+            !resp_body.contains("<Deleted>"),
+            "no Deleted entries expected"
+        );
+        assert_eq!(
+            resp_body.matches("<Error>").count(),
+            3,
+            "expected 3 Error entries (one per key)"
+        );
+        assert!(resp_body.contains("<Key>alpha</Key>"));
+        assert!(resp_body.contains("<Key>beta</Key>"));
+        assert!(resp_body.contains("<Key>gamma</Key>"));
+        assert!(resp_body.contains("<Code>NoSuchBucket</Code>"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_malformed_xml_returns_error() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-malformed").await.unwrap();
+
+        let body = Bytes::from("not valid xml at all");
+        let err = handle_delete_objects(&storage, "del-malformed", body)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), 400);
+        assert_eq!(err.error_code(), "InvalidArgument");
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_empty_body_returns_error() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-empty-body").await.unwrap();
+
+        let body = Bytes::new();
+        let err = handle_delete_objects(&storage, "del-empty-body", body)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), 400);
+        assert_eq!(err.error_code(), "InvalidArgument");
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_with_version_id_is_echoed_in_response() {
+        // Per S3 spec, the VersionId from the request must be echoed back
+        // in the <Deleted> element of the response.
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-versioned").await.unwrap();
+
+        handle_put_object(
+            &storage,
+            "del-versioned",
+            "v-key",
+            "text/plain",
+            HashMap::new(),
+            Bytes::from("data"),
+        )
+        .await
+        .expect("put_object");
+
+        let xml = Bytes::from(
+            "<Delete><Object><Key>v-key</Key><VersionId>abc123</VersionId></Object></Delete>",
+        );
+        let resp = handle_delete_objects(&storage, "del-versioned", xml)
+            .await
+            .expect("should succeed with version_id present");
+        assert_eq!(resp.status(), 200);
+
+        let resp_body = body_to_string(resp.into_body()).await;
+        assert!(
+            resp_body.contains("<VersionId>abc123</VersionId>"),
+            "VersionId should be echoed in response: {resp_body}"
+        );
+        assert!(resp_body.contains("<Key>v-key</Key>"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_version_id_echoed_in_nosuchkey_error() {
+        // Per S3 spec, VersionId from the request must be echoed back
+        // in <Error> elements when the key doesn't exist.
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-versioned-error").await.unwrap();
+
+        // Delete a non-existent key with a VersionId — should get a NoSuchKey error
+        // that echoes the VersionId back.
+        let xml = Bytes::from(
+            "<Delete><Object><Key>no-such-key</Key><VersionId>ver-999</VersionId></Object></Delete>",
+        );
+        let resp = handle_delete_objects(&storage, "del-versioned-error", xml)
+            .await
+            .expect("should succeed with per-key error");
+        assert_eq!(resp.status(), 200);
+
+        let resp_body = body_to_string(resp.into_body()).await;
+        assert!(
+            resp_body.contains("<VersionId>ver-999</VersionId>"),
+            "VersionId should be echoed in error response: {resp_body}"
+        );
+        assert!(resp_body.contains("<Code>NoSuchKey</Code>"));
+        assert!(resp_body.contains("<Key>no-such-key</Key>"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_version_id_absent_when_request_has_none() {
+        // When the request has no VersionId, the response should not include
+        // a <VersionId> element (skip_serializing_if handles this).
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-no-version").await.unwrap();
+
+        handle_put_object(
+            &storage,
+            "del-no-version",
+            "plain-key",
+            "text/plain",
+            HashMap::new(),
+            Bytes::from("data"),
+        )
+        .await
+        .expect("put_object");
+
+        let xml = Bytes::from("<Delete><Object><Key>plain-key</Key></Object></Delete>");
+        let resp = handle_delete_objects(&storage, "del-no-version", xml)
+            .await
+            .expect("should succeed");
+        assert_eq!(resp.status(), 200);
+
+        let resp_body = body_to_string(resp.into_body()).await;
+        assert!(
+            !resp_body.contains("<VersionId>"),
+            "VersionId should not appear when request has none: {resp_body}"
+        );
+        assert!(resp_body.contains("<Key>plain-key</Key>"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_over_1000_returns_invalid_argument() {
+        let storage = DefaultStorage::new();
+
+        // 1001 keys — exceeds the 1000-key limit.
+        let keys: Vec<String> = (0..1001).map(|i| format!("k-{}", i)).collect();
+        let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        let body = delete_xml_body(&key_refs, None);
+
+        let err = handle_delete_objects(&storage, "some-bucket", body)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), 400);
+        assert_eq!(err.error_code(), "InvalidArgument");
+        // The XML response should carry the Limit message.
+        let xml = err.to_xml();
+        assert!(xml.contains("must not exceed 1000"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_exactly_1000_succeeds() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-1000").await.unwrap();
+
+        let keys: Vec<String> = (0..1000).map(|i| format!("k-{}", i)).collect();
+        let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        let body = delete_xml_body(&key_refs, None);
+
+        let resp = handle_delete_objects(&storage, "del-1000", body)
+            .await
+            .expect("1000 keys should be allowed");
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_delete_objects_999_succeeds() {
+        let storage = DefaultStorage::new();
+        storage.create_bucket("del-999").await.unwrap();
+
+        let keys: Vec<String> = (0..999).map(|i| format!("k-{}", i)).collect();
+        let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        let body = delete_xml_body(&key_refs, None);
+
+        let resp = handle_delete_objects(&storage, "del-999", body)
+            .await
+            .expect("999 keys should be allowed");
+        assert_eq!(resp.status(), 200);
     }
 }

@@ -408,7 +408,7 @@ pub struct CommonPrefixes {
 pub struct DeleteRequest {
     #[serde(rename = "Quiet", default)]
     pub quiet: bool,
-    #[serde(rename = "Object")]
+    #[serde(rename = "Object", default)]
     pub objects: Vec<DeleteObject>,
 }
 
